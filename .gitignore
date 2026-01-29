@@ -1,0 +1,29 @@
+# Virtual environment
+venv/
+.venv/
+env/
+ENV/
+
+# PyCharm
+.idea/
+__pycache__/
+*.py[cod]
+*.swp
+*.egg-info/
+dist/
+build/
+
+# Logs and databases
+*.log
+*.sqlite
+*.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+*.json
+*.env
+media/
+
