@@ -1,7 +1,7 @@
 from aiogram.types import InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from kbds.callbacks import CreatePostCD
+from kbds.callbacks import CreatePostCD, PublishCD, NavCD
 from kbds.post_editor import EditTextCD
 
 
@@ -228,4 +228,57 @@ def ik_attach_media_controls(post_id: int) -> InlineKeyboardMarkup:
     """Клавиатура для режима ожидания медиа (кнопка отмены)."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data=EditTextCD(action="cancel_attach", post_id=post_id).pack())]
+    ])
+
+def ik_send_mode(post_id: int, channel_title: str, channel_url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="Выложить сразу",
+                callback_data=PublishCD(action="now", post_id=post_id).pack()
+            ),
+            InlineKeyboardButton(
+                text="Отложить",
+                callback_data=PublishCD(action="later", post_id=post_id).pack()
+            ),
+        ]
+    ])
+
+def ik_delete_after(post_id: int) -> InlineKeyboardMarkup:
+    options = [
+        ("1час", "1h"),
+        ("6 часов", "6h"),
+        ("12 часов", "12h"),
+        ("24 часов", "24h"),
+        ("48 часов", "48h"),
+        ("3 дня", "3d"),
+        ("7 дней", "7d"),
+        ("Не нужно", "none"),
+    ]
+    rows = []
+    # по 2 кнопки в ряд
+    for i in range(0, len(options), 2):
+        row = []
+        for text, val in options[i:i+2]:
+            row.append(InlineKeyboardButton(
+                text=text,
+                callback_data=PublishCD(action="del", post_id=post_id, value=val).pack()
+            ))
+        rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def ik_confirm_publish(post_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Да", callback_data=PublishCD(action="confirm_yes", post_id=post_id).pack()),
+            InlineKeyboardButton(text="Нет", callback_data=PublishCD(action="confirm_no", post_id=post_id).pack()),
+        ]
+    ])
+
+def ik_finish_nav() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Контент план", callback_data=NavCD(action="content_plan").pack()),
+            InlineKeyboardButton(text="Создать пост", callback_data=NavCD(action="create_post").pack()),
+        ]
     ])

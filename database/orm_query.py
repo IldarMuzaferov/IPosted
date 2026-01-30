@@ -1347,21 +1347,35 @@ def _detect_content_type(message) -> str:
         return "text"
     return "unknown"
 
+def _extract_media_from_message(message) -> tuple[str | None, str | None, str | None]:
+    """
+    Извлекает тип медиа, file_id и file_unique_id из сообщения.
+    """
+    if message.photo:
+        photo = message.photo[-1]
+        return "photo", photo.file_id, photo.file_unique_id
+    if message.video:
+        return "video", message.video.file_id, message.video.file_unique_id
+    if message.animation:
+        return "gif", message.animation.file_id, message.animation.file_unique_id
+    if message.document:
+        return "document", message.document.file_id, message.document.file_unique_id
+    if message.voice:
+        return "voice", message.voice.file_id, message.voice.file_unique_id
+    if message.audio:
+        return "document", message.audio.file_id, message.audio.file_unique_id
+    if message.video_note:
+        return "video", message.video_note.file_id, message.video_note.file_unique_id
+    return None, None, None
+
 
 async def orm_create_post_from_message(
-    session: AsyncSession,
-    *,
-    user_id: int,
-    message,
-    channel_ids: Iterable[int],
+        session: AsyncSession,
+        *,
+        user_id: int,
+        message,
+        channel_ids: Iterable[int],
 ) -> int:
-    """
-    Минимальная версия:
-    - создаёт Post (draft)
-    - создаёт PostTarget для выбранных каналов (draft)
-    Содержимое пока сохраняем только текст/caption + тип.
-    Медиа file_id добавим следующим этапом.
-    """
     text = message.text or message.caption or None
 
     post = Post(
@@ -1370,7 +1384,22 @@ async def orm_create_post_from_message(
         created_at=datetime.utcnow(),
     )
     session.add(post)
-    await session.flush()  # чтобы получить post.id
+    await session.flush()
+
+    # ========== ДОБАВЛЕНО: Сохраняем медиа ==========
+    media_type_str, file_id, file_unique_id = _extract_media_from_message(message)
+
+    if media_type_str and file_id:
+        mt = MediaType(media_type_str)
+        post_media = PostMedia(
+            post_id=post.id,
+            media_type=mt,
+            file_id=file_id,
+            file_unique_id=file_unique_id,
+            order_index=0,
+        )
+        session.add(post_media)
+    # ================================================
 
     for ch_id in channel_ids:
         session.add(
@@ -1385,27 +1414,50 @@ async def orm_create_post_from_message(
     await session.flush()
     return int(post.id)
 
+
 async def orm_create_post_from_album(
-    session: AsyncSession,
-    *,
-    user_id: int,
-    messages: list,
-    channel_ids,
+        session: AsyncSession,
+        *,
+        user_id: int,
+        messages: list,
+        channel_ids,
 ) -> int:
-    # текст/caption берём из первой части альбома
-    first = messages[0]
+    text = None
+    for msg in messages:
+        if msg.caption:
+            text = msg.caption
+            break
+
     post = Post(
         author_id=user_id,
-        text=first.caption or first.text or None,
+        text=text,
+        created_at=datetime.utcnow(),
     )
     session.add(post)
     await session.flush()
+
+    # ========== ДОБАВЛЕНО: Сохраняем все медиа альбома ==========
+    for idx, msg in enumerate(messages):
+        media_type_str, file_id, file_unique_id = _extract_media_from_message(msg)
+
+        if media_type_str and file_id:
+            mt = MediaType(media_type_str)
+            post_media = PostMedia(
+                post_id=post.id,
+                media_type=mt,
+                file_id=file_id,
+                file_unique_id=file_unique_id,
+                order_index=idx,
+            )
+            session.add(post_media)
+    # ============================================================
 
     for ch_id in channel_ids:
         session.add(PostTarget(post_id=post.id, channel_id=ch_id, state=TargetState.draft))
 
     await session.flush()
     return int(post.id)
+
 
 async def orm_edit_post_text(session: AsyncSession, *, post_id: int, text: str | None):
     await session.execute(
@@ -1564,3 +1616,68 @@ async def orm_delete_post_buttons(session: AsyncSession, post_id: int) -> None:
 
     stmt = delete(PostButton).where(PostButton.post_id == post_id)
     await session.execute(stmt)
+
+
+async def orm_set_post_text_position(session: AsyncSession, *, post_id: int, position: str) -> None:
+    post = await session.get(Post, post_id)
+    if not post:
+        raise NotFound("post not found")
+    post.text_position = position
+    await session.flush()
+
+
+async def orm_get_hidden_part(session: AsyncSession, *, post_id: int):
+    from database.models import PostHiddenPart
+    return await session.get(PostHiddenPart, post_id)
+
+
+async def orm_save_hidden_part(
+        session: AsyncSession,
+        *,
+        post_id: int,
+        button_text: str,
+        subscriber_text: str,
+        nonsubscriber_text: str | None = None,
+) -> None:
+    from database.models import PostHiddenPart
+
+    existing = await session.get(PostHiddenPart, post_id)
+    if existing:
+        existing.button_text = button_text
+        existing.subscriber_text = subscriber_text
+        existing.nonsubscriber_text = nonsubscriber_text
+    else:
+        hidden_part = PostHiddenPart(
+            post_id=post_id,
+            button_text=button_text,
+            subscriber_text=subscriber_text,
+            nonsubscriber_text=nonsubscriber_text,
+        )
+        session.add(hidden_part)
+    await session.flush()
+
+
+async def orm_delete_hidden_part(session: AsyncSession, *, post_id: int) -> None:
+    from database.models import PostHiddenPart
+    from sqlalchemy import delete
+
+    await session.execute(delete(PostHiddenPart).where(PostHiddenPart.post_id == post_id))
+    await session.flush()
+
+
+async def orm_get_post_with_channel(session: AsyncSession, *, post_id: int):
+    """
+    Загружает пост с targets для определения channel_id.
+    Использует eager loading чтобы избежать greenlet error.
+    """
+    from database.models import Post
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    stmt = (
+        select(Post)
+        .where(Post.id == post_id)
+        .options(selectinload(Post.targets))
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()

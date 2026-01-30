@@ -24,6 +24,29 @@ class AttachMediaStates(StatesGroup):
 class UrlButtonsStates(StatesGroup):
     waiting_buttons = State()
 
+class PublishStates(StatesGroup):
+    choosing_send_mode = State()     # "Выложить сразу" / "Отложить"
+    waiting_datetime = State()       # ждём ввод "18:01 16.8.2020"
+    choosing_delete_after = State()  # выбор таймера удаления
+    confirming = State()             # "Да" / "Нет"
+
+class HiddenPartStates(StatesGroup):
+    waiting_button_name = State()
+    waiting_subscriber_text = State()
+    waiting_nonsubscriber_text = State()
+    editing_button_name = State()
+    editing_subscriber_text = State()
+    editing_nonsubscriber_text = State()
+
+class PublishCD(CallbackData, prefix="pub"):
+    action: str          # now | later | del | confirm_yes | confirm_no
+    post_id: int = 0
+    value: str = ""      # для del: "1h", "6h", ... "none"
+
+
+class NavCD(CallbackData, prefix="nav"):
+    action: str
+
 class CreatePostCD(CallbackData, prefix="cp"):
     """
     action:
@@ -38,3 +61,4 @@ class CreatePostCD(CallbackData, prefix="cp"):
     action: str
     folder_id: int = 0
     channel_id: int = 0
+

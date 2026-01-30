@@ -2,6 +2,7 @@ import asyncio
 import re
 from typing import Optional, Tuple
 
+from datetime import datetime, timedelta, timezone
 from aiogram import F, types, Router, Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart, StateFilter
@@ -11,24 +12,30 @@ from aiogram.types import Message, CallbackQuery, ContentType, ReplyKeyboardMark
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 
-from database.models import TgMemberStatus
+from database.models import TgMemberStatus, PostEventType
 from database.orm_query import orm_get_user_channels, orm_get_free_channels_for_user, orm_get_folder_channels, \
     orm_get_user_folders, orm_add_channel_admin, orm_upsert_channel, orm_upsert_user, orm_create_post_from_message, \
-    orm_edit_post_text, orm_add_media_to_post
+    orm_edit_post_text, orm_add_media_to_post, orm_get_post_full, orm_set_target_autodelete, orm_publish_target_now, \
+    orm_log_post_event, orm_schedule_target, orm_set_post_flags
 from filters.chat_types import ChatTypeFilter
 from kbds.callbacks import CreatePostCD, CreatePostStates, ConnectChannelStates, EditTextStates, AttachMediaStates, \
-    UrlButtonsStates
+    UrlButtonsStates, PublishStates, PublishCD
 from kbds.inline import get_callback_btns, get_url_btns, get_inlineMix_btns, ik_channels_picker, ik_create_post_menu, \
     ik_create_root_menu, ik_channels_menu, ik_folders_menu, ik_after_channel_connected, ik_folders_empty, \
-    ik_folder_channels, ik_folders_list, ik_edit_text_controls, ik_attach_media_controls
+    ik_folder_channels, ik_folders_list, ik_edit_text_controls, ik_attach_media_controls, ik_send_mode, ik_delete_after, \
+    ik_confirm_publish, ik_finish_nav
 from datetime import datetime
 # from main import bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import datetime as dt
 from create_bot import bot
 from datetime import datetime as dt_utc
-from kbds.post_editor import CopyPostCD, build_copy_channels_kb, UrlButtonsCD
+from kbds.post_editor import CopyPostCD, build_copy_channels_kb, UrlButtonsCD, EditorContext, editor_ctx_from_dict, \
+    editor_ctx_to_dict
 from database.orm_query import orm_get_all_user_channels, orm_copy_post_to_channels
+from kbds.post_editor import HiddenPartCD, build_hidden_part_input_kb, build_hidden_part_skip_kb, build_hidden_part_settings_kb
+from kbds.callbacks import HiddenPartStates
+from database.orm_query import orm_get_hidden_part, orm_save_hidden_part, orm_delete_hidden_part, orm_set_post_text_position
 
 
 from datetime import datetime, timedelta
@@ -74,6 +81,14 @@ def connected_text(title: str, url: str) -> str:
         "✅ Удаление сообщений\n"
         "✅ Редактирование сообщений"
     )
+
+COMMENTS_WARNING = (
+    "⚠️ Для корректной работы функции «Комментарии» убедитесь, что:\n\n"
+    "1. У канала подключена группа обсуждения\n"
+    "2. Бот добавлен в эту группу как администратор\n"
+    "3. У бота есть права на управление темами/сообщениями\n\n"
+    "Если группа обсуждения не подключена, комментарии работать не будут."
+)
 
 @user_private_router.message(CommandStart())
 async def cmd_start(message: types.Message, session: AsyncSession):
@@ -429,8 +444,8 @@ async def _check_bot_rights(bot: Bot, channel_id: int) -> Tuple[bool, str]:
     can_post = getattr(member, "can_post_messages", False)
     can_delete = getattr(member, "can_delete_messages", False)
     can_edit = getattr(member, "can_edit_messages", False)
-
-    if not (can_post and can_delete and can_edit):
+    can_pin = getattr(member, "can_pin_messages", False)
+    if not (can_post and can_delete and can_edit and can_pin):
         return False, "Боту не выданы все права: отправка, удаление, редактирование."
 
     return True, ""
@@ -615,7 +630,7 @@ async def on_compose_any_message(message: types.Message, state: FSMContext, sess
         editor=editor_state_to_dict(st),
         editor_has_media=_message_has_media(message),
         editor_mode=_detect_editor_mode(message),
-        editor_context=ctx,
+        editor_context=editor_ctx_to_dict(ctx),
     )
     existing_buttons = await orm_get_post_buttons(session, post_id=post_id)
     if existing_buttons:
@@ -630,43 +645,73 @@ async def on_compose_any_message(message: types.Message, state: FSMContext, sess
         message_id=st.preview_message_id,
         reply_markup=combined_kb
     )
+
+
 @user_private_router.callback_query(EditorCD.filter(F.action == "toggle"))
 async def editor_toggle(call: types.CallbackQuery, callback_data: EditorCD, state: FSMContext, session: AsyncSession):
+    """Toggle кнопки редактора с защитой от 'message is not modified'."""
     data = await state.get_data()
     if "editor" not in data:
         await call.answer("Редактор не активен", show_alert=True)
         return
 
     st = editor_state_from_dict(data["editor"])
-    editor_ctx = data.get("editor_context")
-    if not editor_ctx:
-        # Если контекст не найден, создаем его из текущего сообщения
-        editor_ctx = make_ctx_from_message(call.message)
+    editor_ctx = get_editor_ctx_from_data(data)
 
-    # защита: это должен быть тот же post_id
     if int(callback_data.post_id) != st.post_id:
         await call.answer("Устаревшая кнопка", show_alert=True)
         return
 
     key = callback_data.key
     if key not in TOGGLE_KEYS:
-        await call.answer("Неизвестная настройка", show_alert=True)
+        await call.answer("Неизвестный ключ", show_alert=True)
         return
 
-    # переключаем флаг
-    current = getattr(st, key)
-    setattr(st, key, not bool(current))
+    # Переключаем значение
+    old_value = getattr(st, key, False)
+    new_value = not old_value
+    setattr(st, key, new_value)
 
-    # сохраним в FSM
+    # Сохраняем в FSM
     await state.update_data(editor=editor_state_to_dict(st))
 
-    # (опционально) сразу пишем в БД настройки, чтобы не потерять при рестарте
-    # await orm_update_post_settings(session, post_id=st.post_id, **{key: getattr(st, key)})
-    # await session.commit()
+    # Специальные сообщения для некоторых кнопок
+    if key == "comments":
+        if new_value:
+            await call.answer(
+                "Комментарии включены.\n\n"
+                "⚠️ Убедитесь, что у канала есть группа обсуждения "
+                "и бот добавлен в неё.",
+                show_alert=True
+            )
+        else:
+            await call.answer("Комментарии отключены")
+    elif key == "content_protect":
+        await call.answer("Защита контента " + ("включена" if new_value else "отключена"))
+    elif key == "pin":
+        await call.answer("Пост будет " + ("закреплён" if new_value else "не закреплён"))
+    elif key == "reactions":
+        await call.answer("Реакции " + ("включены" if new_value else "отключены"))
+    elif key == "bell":
+        await call.answer("Пост выйдет " + ("с уведомлением" if new_value else "без уведомления"))
+    else:
+        await call.answer()
 
-    # перерисуем клавиатуру на том же сообщении (на превью)
-    await call.message.edit_reply_markup(reply_markup=build_editor_kb(st.post_id, st, ctx=editor_ctx))
-    await call.answer()
+    # Перестраиваем клавиатуру
+    existing_buttons = await orm_get_post_buttons(session, post_id=st.post_id)
+    editor_kb = build_editor_kb(st.post_id, st, ctx=editor_ctx)
+
+    if existing_buttons:
+        combined_kb = merge_url_and_editor_kb(existing_buttons, editor_kb)
+    else:
+        combined_kb = editor_kb
+
+    # Обновляем клавиатуру с защитой от ошибки
+    try:
+        await call.message.edit_reply_markup(reply_markup=combined_kb)
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
 
 
 def _has_media_in_preview(msg: types.Message) -> bool:
@@ -738,7 +783,7 @@ async def edit_text_receive_new_text(message: types.Message, state: FSMContext, 
     editor = editor_state_from_dict(data["editor"])
 
     # Получаем или создаем контекст
-    editor_ctx = data.get("editor_context")
+    editor_ctx = get_editor_ctx_from_data(data)
     if not editor_ctx:
         # Пытаемся получить сообщение превью
         try:
@@ -821,7 +866,7 @@ async def edit_text_delete(call: types.CallbackQuery, callback_data: EditTextCD,
     post_id = int(callback_data.post_id)
     preview_chat_id = int(data["edit_text_preview_chat_id"])
     preview_message_id = int(data["edit_text_preview_message_id"])
-    editor_ctx = data.get("editor_context")
+    editor_ctx = get_editor_ctx_from_data(data)
     is_album = data.get("is_album", False)
     album_caption_message_id = data.get("album_caption_message_id")
     if not editor_ctx:
@@ -1011,7 +1056,7 @@ async def attach_media_receive(message: types.Message, state: FSMContext, sessio
         editor=editor_state_to_dict(st),
         editor_has_media=True,
         editor_mode="photo_with_initial_text" if media_type == "photo" else "media_with_text",
-        editor_context=ctx,
+        editor_context=editor_ctx_to_dict(ctx) if isinstance(ctx, EditorContext) else ctx,
     )
 
     # Вешаем клавиатуру на новое превью
@@ -1258,7 +1303,7 @@ async def copy_apply(call: types.CallbackQuery, callback_data: CopyPostCD, state
 
     # Возвращаемся к редактору
     st = editor_state_from_dict(data["editor"])
-    editor_ctx = data.get("editor_context")
+    editor_ctx = get_editor_ctx_from_data(data)
     if not editor_ctx:
         editor_ctx = make_ctx_from_message(call.message)
 
@@ -1282,7 +1327,7 @@ async def copy_back(call: types.CallbackQuery, callback_data: CopyPostCD, state:
     data = await state.get_data()
 
     st = editor_state_from_dict(data["editor"])
-    editor_ctx = data.get("editor_context")
+    editor_ctx = get_editor_ctx_from_data(data)
     if not editor_ctx:
         editor_ctx = make_ctx_from_message(call.message)
 
@@ -1442,10 +1487,8 @@ async def url_buttons_receive(message: types.Message, state: FSMContext, session
     st.has_url_buttons = True
     await state.update_data(editor=editor_state_to_dict(st))
 
-    # Получаем editor context
-    editor_ctx = data.get("editor_context")
-    if not editor_ctx:
-        editor_ctx = make_ctx_from_message(message)
+    # ИСПРАВЛЕНО: Используем get_editor_ctx_from_data
+    editor_ctx = get_editor_ctx_from_data(data)
 
     # Строим клавиатуру: URL-кнопки + кнопки редактора
     editor_kb = build_editor_kb(post_id, st, ctx=editor_ctx)
@@ -1475,10 +1518,8 @@ async def url_buttons_receive(message: types.Message, state: FSMContext, session
 
     await state.set_state(CreatePostStates.composing)
 
-
 @user_private_router.callback_query(UrlButtonsCD.filter(F.action == "delete"))
-async def url_buttons_delete(call: types.CallbackQuery, callback_data: UrlButtonsCD, state: FSMContext,
-                             session: AsyncSession):
+async def url_buttons_delete(call: types.CallbackQuery, callback_data: UrlButtonsCD, state: FSMContext, session: AsyncSession):
     """Удалить все URL-кнопки."""
     data = await state.get_data()
 
@@ -1496,10 +1537,8 @@ async def url_buttons_delete(call: types.CallbackQuery, callback_data: UrlButton
     st.has_url_buttons = False
     await state.update_data(editor=editor_state_to_dict(st))
 
-    # Получаем editor context
-    editor_ctx = data.get("editor_context")
-    if not editor_ctx:
-        editor_ctx = make_ctx_from_message(call.message)
+    # ИСПРАВЛЕНО: Используем get_editor_ctx_from_data
+    editor_ctx = get_editor_ctx_from_data(data)
 
     # Строим клавиатуру только с кнопками редактора (без URL-кнопок)
     editor_kb = build_editor_kb(post_id, st, ctx=editor_ctx)
@@ -1532,3 +1571,759 @@ async def url_buttons_back(call: types.CallbackQuery, callback_data: UrlButtonsC
     await state.set_state(CreatePostStates.composing)
     await call.message.delete()
     await call.answer()
+
+@user_private_router.callback_query(EditorCD.filter(F.action == "continue"))
+async def editor_continue(call: types.CallbackQuery, callback_data: EditorCD, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    if "editor" not in data:
+        await call.answer("Редактор не активен", show_alert=True)
+        return
+
+    st = editor_state_from_dict(data["editor"])
+    if int(callback_data.post_id) != st.post_id:
+        await call.answer("Устаревшая кнопка", show_alert=True)
+        return
+
+    selected_ids = set(data.get("selected_channel_ids") or [])
+    if not selected_ids:
+        await call.answer("Не выбраны каналы для публикации", show_alert=True)
+        return
+
+    # ========== ДОБАВЛЕНО: Сохраняем флаги в БД ==========
+    await orm_set_post_flags(
+        session,
+        post_id=st.post_id,
+        silent=not st.bell,              # bell=True → silent=False
+        pinned=st.pin,
+        protected=st.content_protect,
+        reactions_enabled=st.reactions,
+        comments_enabled=st.comments,
+    )
+    await session.commit()
+    # =====================================================
+
+    channels = await orm_get_user_channels(session, user_id=call.from_user.id)
+    channels = [ch for ch in channels if int(ch.id) in selected_ids]
+    if not channels:
+        await call.answer("Каналы не найдены", show_alert=True)
+        return
+
+    first = channels[0]
+    channel_title = first.title
+    channel_url = f"https://t.me/{first.username}" if getattr(first, "username", None) else "https://t.me/"
+
+    text = (
+        "💼 НАСТРОЙКИ ОТПРАВКИ\n\n"
+        f"Пост готов к публикации в канале {channel_title} ({channel_url})."
+    )
+
+    await state.update_data(
+        publish_post_id=st.post_id,
+        publish_selected_channel_ids=list(selected_ids),
+        publish_channel_title=channel_title,
+        publish_channel_url=channel_url,
+    )
+    await state.set_state(PublishStates.choosing_send_mode)
+
+    await call.message.answer(text, reply_markup=ik_send_mode(st.post_id, channel_title, channel_url), disable_web_page_preview=True)
+    await call.answer()
+
+@user_private_router.callback_query(PublishCD.filter(F.action == "later"))
+async def publish_later(call: types.CallbackQuery, callback_data: PublishCD, state: FSMContext):
+    await state.update_data(
+        publish_post_id=int(callback_data.post_id),
+        publish_send_mode="later",
+    )
+    await state.set_state(PublishStates.waiting_datetime)
+
+    await call.message.answer(
+        "Введите время размещения в вашем часовом поясе (Москва GMT +3). Сменить дату размещения можно в настройках\n\n"
+        "Например: 18:01 16.8.2020"
+    )
+    await call.answer()
+
+def _parse_user_dt(text: str) -> datetime | None:
+    """
+    Поддержка: HH:MM D.M.YYYY (день/месяц могут быть 1-2 цифры)
+    """
+    import re
+    t = (text or "").strip()
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})\s+(\d{1,2})\.(\d{1,2})\.(\d{4})", t)
+    if not m:
+        return None
+    hh, mm, dd, mo, yy = map(int, m.groups())
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        return None
+    try:
+        return datetime(yy, mo, dd, hh, mm)
+    except ValueError:
+        return None
+
+@user_private_router.message(StateFilter(PublishStates.waiting_datetime), F.text)
+async def publish_receive_datetime(message: types.Message, state: FSMContext):
+    user_dt = _parse_user_dt(message.text)
+    if not user_dt:
+        await message.answer("Неверный формат. Пример: 18:01 16.8.2020")
+        return
+
+    await state.update_data(publish_scheduled_dt=user_dt.isoformat())
+    await state.set_state(PublishStates.choosing_delete_after)
+
+    post_id = int((await state.get_data()).get("publish_post_id"))
+    await message.answer(
+        "Вы можете установить через какое время после выхода поста, он будет удалён. "
+        "Задайте время, через которое нужно удалить пост, введя время вручную.",
+        reply_markup=ik_delete_after(post_id),
+    )
+
+def _delete_value_to_timedelta(val: str) -> timedelta | None:
+    return {
+        "1h": timedelta(hours=1),
+        "6h": timedelta(hours=6),
+        "12h": timedelta(hours=12),
+        "24h": timedelta(hours=24),
+        "48h": timedelta(hours=48),
+        "3d": timedelta(days=3),
+        "7d": timedelta(days=7),
+        "none": None,
+    }.get(val)
+
+@user_private_router.callback_query(PublishCD.filter(F.action == "del"))
+async def publish_pick_delete(call: types.CallbackQuery, callback_data: PublishCD, state: FSMContext):
+    td = _delete_value_to_timedelta(callback_data.value)
+    await state.update_data(publish_delete_after=callback_data.value)  # храним строкой
+    await state.set_state(PublishStates.confirming)
+
+    await call.message.answer("Уверены что хотите опубликовать пост?", reply_markup=ik_confirm_publish(int(callback_data.post_id)))
+    await call.answer()
+
+_RU_WEEKDAY = ["понедельник","вторник","среда","четверг","пятница","суббота","воскресенье"]
+_RU_MONTH = ["января","февраля","марта","апреля","мая","июня","июля","августа","сентября","октября","ноября","декабря"]
+
+def _fmt_ru_dt(d: datetime) -> str:
+    wd = _RU_WEEKDAY[d.weekday()]
+    month = _RU_MONTH[d.month - 1]
+    return f"во {wd}, {d.day} {month} {d.year}, {d:%H:%M}"
+
+def _fmt_delete_after(val: str) -> str:
+    mapping = {
+        "1h": "1 час",
+        "6h": "6 часов",
+        "12h": "12 часов",
+        "24h": "24 часа",
+        "48h": "48 часов",
+        "3d": "3 дня",
+        "7d": "7 дней",
+        "none": "не будет удалён",
+    }
+    return mapping.get(val, "не указано")
+
+@user_private_router.callback_query(PublishCD.filter(F.action == "confirm_no"))
+async def publish_confirm_no(call: types.CallbackQuery, state: FSMContext):
+    await state.set_state(CreatePostStates.composing)
+    await call.message.answer("Ок, публикация отменена.")
+    await call.answer()
+
+@user_private_router.callback_query(PublishCD.filter(F.action == "confirm_yes"))
+async def publish_confirm_yes(call: types.CallbackQuery, callback_data: PublishCD, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+
+    post_id = int(data["publish_post_id"])
+    selected_ids = set(data.get("publish_selected_channel_ids") or [])
+    send_mode = data.get("publish_send_mode")  # "now" или "later"
+
+    # 1) достаём post и targets
+    post = await orm_get_post_full(session, post_id=post_id)  # должен вернуть post + targets
+    targets = [t for t in post.targets if int(t.channel_id) in selected_ids]
+
+    # 2) автоудаление
+    delete_val = data.get("publish_delete_after", "none")
+    delete_after = _delete_value_to_timedelta(delete_val)  # timedelta|None
+
+    for t in targets:
+        await orm_set_target_autodelete(
+            session,
+            actor_user_id=call.from_user.id,
+            target_id=t.id,
+            delete_after=delete_after,
+        )
+
+    selected_ids = set(data.get("publish_selected_channel_ids") or [])
+    channels = await orm_get_user_channels(session, user_id=call.from_user.id)
+    channels = [ch for ch in channels if int(ch.id) in selected_ids]
+    channel_names = ", ".join([ch.title for ch in channels]) if channels else "Канал"
+
+    scheduled_iso = data.get("publish_scheduled_dt")
+    scheduled_dt = datetime.fromisoformat(scheduled_iso) if scheduled_iso else None
+    send_mode = data.get("publish_send_mode")
+
+    delete_val = data.get("publish_delete_after", "none")
+    delete_text = _fmt_delete_after(delete_val)
+    if send_mode == "now":
+        for t in targets:
+            await orm_publish_target_now(session, actor_user_id=call.from_user.id, target_id=t.id)
+        await orm_log_post_event(session, post_id=post_id, event_type=PostEventType.scheduled,
+                                 actor_user_id=call.from_user.id, payload={"mode": "now"})
+    else:
+        publish_at = datetime.fromisoformat(data["publish_scheduled_dt"])
+        for t in targets:
+            await orm_schedule_target(session, actor_user_id=call.from_user.id, target_id=t.id, publish_at=publish_at)
+        await orm_log_post_event(session, post_id=post_id, event_type=PostEventType.scheduled,
+                                 actor_user_id=call.from_user.id,
+                                 payload={"mode": "later", "publish_at": publish_at.isoformat()})
+
+    await session.commit()
+
+    if send_mode == "now":
+        dt_text = _fmt_ru_dt(scheduled_dt) if scheduled_dt else "сразу"
+        text = (
+            f"Пост опубликован в канал {channel_names} ({dt_text}).\n\n"
+            f"Пост будет удален через {delete_text}."
+        )
+    else:
+        dt_text = _fmt_ru_dt(scheduled_dt)
+        text = (
+            f"Пост запланирован в канал {channel_names} и будет опубликован {dt_text}.\n\n"
+            f"Пост будет удален через {delete_text}."
+        )
+
+    await call.message.answer(text, reply_markup=ik_finish_nav())
+    await state.set_state(CreatePostStates.composing)
+    await call.answer()
+
+@user_private_router.callback_query(PublishCD.filter(F.action == "now"))
+async def publish_now(call: types.CallbackQuery, callback_data: PublishCD, state: FSMContext):
+    # фиксируем post_id
+    await state.update_data(publish_post_id=int(callback_data.post_id), publish_send_mode="now")
+
+
+    # чтобы в финальном сообщении была понятная дата публикации, ставим "сейчас" в МСК
+    MSK = timezone(timedelta(hours=3))
+    now_msk = datetime.now(MSK).replace(tzinfo=None)
+    await state.update_data(publish_scheduled_dt=now_msk.isoformat())
+
+    await state.set_state(PublishStates.choosing_delete_after)
+
+    await call.message.answer(
+        "Вы можете установить через какое время после выхода поста, он будет удалён. "
+        "Задайте время, через которое нужно удалить пост, введя время вручную.",
+        reply_markup=ik_delete_after(int(callback_data.post_id)),
+    )
+    await call.answer()
+
+
+@user_private_router.callback_query(EditorCD.filter(F.action == "toggle_text_position"))
+async def editor_toggle_text_position(call: types.CallbackQuery, callback_data: EditorCD, state: FSMContext,
+                                      session: AsyncSession):
+    """Переключение позиции текста (сверху/снизу фото) - в одном сообщении."""
+    data = await state.get_data()
+    if "editor" not in data:
+        await call.answer("Редактор не активен", show_alert=True)
+        return
+
+    st = editor_state_from_dict(data["editor"])
+    if int(callback_data.post_id) != st.post_id:
+        await call.answer("Устаревшая кнопка", show_alert=True)
+        return
+
+    # Переключаем позицию
+    new_position = "top" if st.text_position == "bottom" else "bottom"
+    st.text_position = new_position
+
+    # Сохраняем в БД
+    await orm_set_post_text_position(session, post_id=st.post_id, position=new_position)
+    await session.commit()
+
+    # Обновляем FSM
+    await state.update_data(editor=editor_state_to_dict(st))
+
+    # Получаем контекст
+    editor_ctx = get_editor_ctx_from_data(data)
+    if not editor_ctx:
+        editor_ctx = EditorContext(kind="photo", has_media=True, has_text=True, text_was_initial=True,
+                                   text_added_later=False)
+
+    # Перестраиваем клавиатуру
+    existing_buttons = await orm_get_post_buttons(session, post_id=st.post_id)
+    editor_kb = build_editor_kb(st.post_id, st, ctx=editor_ctx)
+
+    if existing_buttons:
+        combined_kb = merge_url_and_editor_kb(existing_buttons, editor_kb)
+    else:
+        combined_kb = editor_kb
+
+    # Обновляем клавиатуру
+    try:
+        await call.message.edit_reply_markup(reply_markup=combined_kb)
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
+
+    pos_text = "сверху" if new_position == "top" else "снизу"
+    await call.answer(f"Текст будет {pos_text}")
+
+
+# =============================================================================
+# 3. СКРЫТОЕ ПРОДОЛЖЕНИЕ - Обработчики
+# =============================================================================
+
+HIDDEN_PART_INTRO = (
+    "🔒 <b>Скрытое продолжение</b>\n\n"
+    "В этом разделе вы можете добавить кнопки, под которые вы можете "
+    "скрыть текст от тех, кто не подписан на ваш канал.\n\n"
+    "Отправьте боту название кнопки.\n\n"
+    "Ваши подписчики увидят скрытый текст, нажав на эту кнопку."
+)
+
+HIDDEN_PART_SUBSCRIBER_TEXT = (
+    "Отправьте боту текст, который увидят <b>подписчики</b> вашего канала по нажатию на кнопку."
+)
+
+HIDDEN_PART_NONSUBSCRIBER_TEXT = (
+    "Отправьте боту текст, который по нажатию на кнопку увидят люди, "
+    "<b>не подписанные</b> на ваш канал."
+)
+
+HIDDEN_PART_SETTINGS = (
+    "В этом разделе вы можете отредактировать кнопки Скрытого продолжения для вашего поста."
+)
+
+
+@user_private_router.callback_query(EditorCD.filter(F.action == "hidden_part"))
+async def editor_hidden_part(call: types.CallbackQuery, callback_data: EditorCD, state: FSMContext,
+                             session: AsyncSession):
+    """Кнопка 'Скрытое продолжение'."""
+    data = await state.get_data()
+    if "editor" not in data:
+        await call.answer("Редактор не активен", show_alert=True)
+        return
+
+    st = editor_state_from_dict(data["editor"])
+    if int(callback_data.post_id) != st.post_id:
+        await call.answer("Устаревшая кнопка", show_alert=True)
+        return
+
+    # Проверяем, есть ли уже скрытое продолжение
+    existing = await orm_get_hidden_part(session, post_id=st.post_id)
+
+    # Сохраняем post_id для следующих шагов
+    await state.update_data(hidden_part_post_id=st.post_id)
+
+    if existing:
+        # Есть - показываем настройки
+        msg = await call.message.answer(
+            HIDDEN_PART_SETTINGS,
+            reply_markup=build_hidden_part_settings_kb(st.post_id),
+        )
+        await state.update_data(hidden_part_ui_msg_id=msg.message_id)
+        await call.answer()
+    else:
+        # Нет - начинаем создание
+        await state.set_state(HiddenPartStates.waiting_button_name)
+
+        msg = await call.message.answer(
+            HIDDEN_PART_INTRO,
+            parse_mode="HTML",
+            reply_markup=build_hidden_part_input_kb(st.post_id),
+        )
+        await state.update_data(hidden_part_ui_msg_id=msg.message_id)
+        await call.answer()
+
+
+@user_private_router.message(StateFilter(HiddenPartStates.waiting_button_name), F.text)
+async def hidden_part_receive_button_name(message: types.Message, state: FSMContext):
+    """Получение названия кнопки."""
+    button_name = message.text.strip()
+
+    if len(button_name) > 64:
+        await message.answer("❌ Название кнопки слишком длинное (максимум 64 символа)")
+        return
+
+    data = await state.get_data()
+    post_id = data.get("hidden_part_post_id")
+
+    # Сохраняем и переходим дальше
+    await state.update_data(hidden_part_button_name=button_name)
+    await state.set_state(HiddenPartStates.waiting_subscriber_text)
+
+    await message.answer(
+        HIDDEN_PART_SUBSCRIBER_TEXT,
+        parse_mode="HTML",
+        reply_markup=build_hidden_part_input_kb(post_id),
+    )
+
+
+@user_private_router.message(StateFilter(HiddenPartStates.waiting_subscriber_text), F.text)
+async def hidden_part_receive_subscriber_text(message: types.Message, state: FSMContext):
+    """Получение текста для подписчиков."""
+    subscriber_text = message.text.strip()
+
+    if len(subscriber_text) > 4000:
+        await message.answer("❌ Текст слишком длинный (максимум 4000 символов)")
+        return
+
+    data = await state.get_data()
+    post_id = data.get("hidden_part_post_id")
+
+    # Сохраняем и переходим дальше
+    await state.update_data(hidden_part_subscriber_text=subscriber_text)
+    await state.set_state(HiddenPartStates.waiting_nonsubscriber_text)
+
+    await message.answer(
+        HIDDEN_PART_NONSUBSCRIBER_TEXT,
+        parse_mode="HTML",
+        reply_markup=build_hidden_part_skip_kb(post_id),
+    )
+
+
+@user_private_router.message(StateFilter(HiddenPartStates.waiting_nonsubscriber_text), F.text)
+async def hidden_part_receive_nonsubscriber_text(message: types.Message, state: FSMContext, session: AsyncSession):
+    """Получение текста для неподписчиков - ФИНАЛЬНЫЙ ШАГ."""
+    nonsubscriber_text = message.text.strip()
+
+    if len(nonsubscriber_text) > 4000:
+        await message.answer("❌ Текст слишком длинный (максимум 4000 символов)")
+        return
+
+    data = await state.get_data()
+
+    post_id = data.get("hidden_part_post_id")
+    button_name = data.get("hidden_part_button_name")
+    subscriber_text = data.get("hidden_part_subscriber_text")
+
+    # Сохраняем в БД
+    await orm_save_hidden_part(
+        session,
+        post_id=post_id,
+        button_text=button_name,
+        subscriber_text=subscriber_text,
+        nonsubscriber_text=nonsubscriber_text,
+    )
+    await session.commit()
+
+    # Обновляем EditorState
+    st = editor_state_from_dict(data["editor"])
+    st.has_hidden_part = True
+    await state.update_data(editor=editor_state_to_dict(st))
+
+    # Очищаем временные данные и возвращаемся в composing
+    await state.update_data(
+        hidden_part_button_name=None,
+        hidden_part_subscriber_text=None,
+    )
+    await state.set_state(CreatePostStates.composing)
+
+    # Показываем настройки
+    await message.answer(
+        "✅ Скрытое продолжение создано!\n\n" + HIDDEN_PART_SETTINGS,
+        reply_markup=build_hidden_part_settings_kb(post_id),
+    )
+
+
+@user_private_router.callback_query(HiddenPartCD.filter(F.action == "skip"))
+async def hidden_part_skip_nonsubscriber(call: types.CallbackQuery, callback_data: HiddenPartCD, state: FSMContext,
+                                         session: AsyncSession):
+    """Пропуск текста для неподписчиков."""
+    data = await state.get_data()
+
+    post_id = data.get("hidden_part_post_id")
+    button_name = data.get("hidden_part_button_name")
+    subscriber_text = data.get("hidden_part_subscriber_text")
+
+    # Сохраняем в БД без текста для неподписчиков
+    await orm_save_hidden_part(
+        session,
+        post_id=post_id,
+        button_text=button_name,
+        subscriber_text=subscriber_text,
+        nonsubscriber_text=None,
+    )
+    await session.commit()
+
+    # Обновляем EditorState
+    st = editor_state_from_dict(data["editor"])
+    st.has_hidden_part = True
+    await state.update_data(editor=editor_state_to_dict(st))
+
+    # Очищаем и возвращаемся
+    await state.update_data(
+        hidden_part_button_name=None,
+        hidden_part_subscriber_text=None,
+    )
+    await state.set_state(CreatePostStates.composing)
+
+    # Показываем настройки
+    await call.message.edit_text(
+        "✅ Скрытое продолжение создано!\n\n" + HIDDEN_PART_SETTINGS,
+        reply_markup=build_hidden_part_settings_kb(post_id),
+    )
+    await call.answer()
+
+
+@user_private_router.callback_query(HiddenPartCD.filter(F.action == "back"))
+async def hidden_part_back(call: types.CallbackQuery, callback_data: HiddenPartCD, state: FSMContext):
+    """Возврат из создания/редактирования скрытого продолжения."""
+    await state.set_state(CreatePostStates.composing)
+
+    # Очищаем временные данные
+    await state.update_data(
+        hidden_part_button_name=None,
+        hidden_part_subscriber_text=None,
+    )
+
+    await call.message.delete()
+    await call.answer()
+
+
+@user_private_router.callback_query(HiddenPartCD.filter(F.action == "delete"))
+async def hidden_part_delete(call: types.CallbackQuery, callback_data: HiddenPartCD, state: FSMContext,
+                             session: AsyncSession):
+    """Удаление скрытого продолжения."""
+    data = await state.get_data()
+    post_id = callback_data.post_id
+
+    # Удаляем из БД
+    await orm_delete_hidden_part(session, post_id=post_id)
+    await session.commit()
+
+    # Обновляем EditorState
+    if "editor" in data:
+        st = editor_state_from_dict(data["editor"])
+        st.has_hidden_part = False
+        await state.update_data(editor=editor_state_to_dict(st))
+
+    await call.message.delete()
+    await call.answer("Скрытое продолжение удалено")
+
+
+@user_private_router.callback_query(HiddenPartCD.filter(F.action == "save"))
+async def hidden_part_save(call: types.CallbackQuery, callback_data: HiddenPartCD, state: FSMContext,
+                           session: AsyncSession):
+    """Сохранить и вернуться к редактору поста - отправляет новое превью."""
+    data = await state.get_data()
+
+    await state.set_state(CreatePostStates.composing)
+
+    # Удаляем текущее сообщение настроек
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+    if "editor" not in data:
+        await call.answer("Сохранено")
+        return
+
+    st = editor_state_from_dict(data["editor"])
+    editor_ctx = get_editor_ctx_from_data(data)
+
+    # Получаем пост для отправки нового превью
+    post = await orm_get_post_full(session, post_id=st.post_id)
+    if not post:
+        await call.answer("Сохранено")
+        return
+
+    # Строим клавиатуру
+    editor_kb = build_editor_kb(st.post_id, st, ctx=editor_ctx)
+    existing_buttons = await orm_get_post_buttons(session, post_id=st.post_id)
+    if existing_buttons:
+        combined_kb = merge_url_and_editor_kb(existing_buttons, editor_kb)
+    else:
+        combined_kb = editor_kb
+
+    # Отправляем НОВОЕ превью поста
+    # Если есть медиа - копируем старое превью
+    try:
+        res = await call.bot.copy_message(
+            chat_id=call.message.chat.id,
+            from_chat_id=st.preview_chat_id,
+            message_id=st.preview_message_id,
+        )
+        new_preview_id = res.message_id
+
+        # Добавляем клавиатуру к новому превью
+        await call.bot.edit_message_reply_markup(
+            chat_id=call.message.chat.id,
+            message_id=new_preview_id,
+            reply_markup=combined_kb,
+        )
+
+        # Удаляем старое превью
+        try:
+            await call.bot.delete_message(
+                chat_id=st.preview_chat_id,
+                message_id=st.preview_message_id,
+            )
+        except Exception:
+            pass
+
+        # Обновляем preview_message_id в state
+        st.preview_message_id = new_preview_id
+        st.preview_chat_id = call.message.chat.id
+        await state.update_data(editor=editor_state_to_dict(st))
+
+    except Exception as e:
+        # Если не удалось скопировать - пробуем просто обновить клавиатуру
+        try:
+            await call.bot.edit_message_reply_markup(
+                chat_id=st.preview_chat_id,
+                message_id=st.preview_message_id,
+                reply_markup=combined_kb,
+            )
+        except TelegramBadRequest:
+            pass
+
+    # Чистим временные данные
+    await state.update_data(
+        hidden_part_ui_msg_id=None,
+        hidden_part_button_name=None,
+        hidden_part_subscriber_text=None,
+    )
+
+    await call.answer("Сохранено")
+
+
+# =============================================================================
+# РЕДАКТИРОВАНИЕ СКРЫТОГО ПРОДОЛЖЕНИЯ
+# =============================================================================
+
+@user_private_router.callback_query(HiddenPartCD.filter(F.action == "edit_name"))
+async def hidden_part_edit_name(call: types.CallbackQuery, callback_data: HiddenPartCD, state: FSMContext):
+    """Редактирование названия кнопки."""
+    await state.set_state(HiddenPartStates.editing_button_name)
+    await state.update_data(hidden_part_post_id=callback_data.post_id)
+
+    await call.message.edit_text(
+        "Отправьте новое название кнопки:",
+        reply_markup=build_hidden_part_input_kb(callback_data.post_id),
+    )
+    await call.answer()
+
+
+@user_private_router.message(StateFilter(HiddenPartStates.editing_button_name), F.text)
+async def hidden_part_save_edited_name(message: types.Message, state: FSMContext, session: AsyncSession):
+    """Сохранение нового названия."""
+    new_name = message.text.strip()
+
+    if len(new_name) > 64:
+        await message.answer("❌ Название слишком длинное (максимум 64 символа)")
+        return
+
+    data = await state.get_data()
+    post_id = data.get("hidden_part_post_id")
+
+    existing = await orm_get_hidden_part(session, post_id=post_id)
+    if existing:
+        existing.button_text = new_name
+        await session.commit()
+
+    await state.set_state(CreatePostStates.composing)
+    await message.answer(
+        "✅ Название обновлено.\n\n" + HIDDEN_PART_SETTINGS,
+        reply_markup=build_hidden_part_settings_kb(post_id),
+    )
+
+
+@user_private_router.callback_query(HiddenPartCD.filter(F.action == "edit_text"))
+async def hidden_part_edit_text(call: types.CallbackQuery, callback_data: HiddenPartCD, state: FSMContext):
+    """Редактирование текста для подписчиков."""
+    await state.set_state(HiddenPartStates.editing_subscriber_text)
+    await state.update_data(hidden_part_post_id=callback_data.post_id)
+
+    await call.message.edit_text(
+        "Отправьте новый текст для подписчиков:",
+        reply_markup=build_hidden_part_input_kb(callback_data.post_id),
+    )
+    await call.answer()
+
+
+@user_private_router.message(StateFilter(HiddenPartStates.editing_subscriber_text), F.text)
+async def hidden_part_save_edited_text(message: types.Message, state: FSMContext, session: AsyncSession):
+    """Сохранение нового текста для подписчиков."""
+    new_text = message.text.strip()
+
+    if len(new_text) > 4000:
+        await message.answer("❌ Текст слишком длинный")
+        return
+
+    data = await state.get_data()
+    post_id = data.get("hidden_part_post_id")
+
+    existing = await orm_get_hidden_part(session, post_id=post_id)
+    if existing:
+        existing.subscriber_text = new_text
+        await session.commit()
+
+    await state.set_state(CreatePostStates.composing)
+    await message.answer(
+        "✅ Текст обновлён.\n\n" + HIDDEN_PART_SETTINGS,
+        reply_markup=build_hidden_part_settings_kb(post_id),
+    )
+
+
+@user_private_router.callback_query(HiddenPartCD.filter(F.action == "edit_hidden_text"))
+async def hidden_part_edit_hidden_text(call: types.CallbackQuery, callback_data: HiddenPartCD, state: FSMContext):
+    """Редактирование текста для НЕ подписчиков."""
+    await state.set_state(HiddenPartStates.editing_nonsubscriber_text)
+    await state.update_data(hidden_part_post_id=callback_data.post_id)
+
+    await call.message.edit_text(
+        "Отправьте новый текст для людей без подписки:",
+        reply_markup=build_hidden_part_input_kb(callback_data.post_id),
+    )
+    await call.answer()
+
+
+@user_private_router.message(StateFilter(HiddenPartStates.editing_nonsubscriber_text), F.text)
+async def hidden_part_save_edited_hidden_text(message: types.Message, state: FSMContext, session: AsyncSession):
+    """Сохранение нового текста для НЕ подписчиков."""
+    new_text = message.text.strip()
+
+    if len(new_text) > 4000:
+        await message.answer("❌ Текст слишком длинный")
+        return
+
+    data = await state.get_data()
+    post_id = data.get("hidden_part_post_id")
+
+    existing = await orm_get_hidden_part(session, post_id=post_id)
+    if existing:
+        existing.nonsubscriber_text = new_text
+        await session.commit()
+
+    await state.set_state(CreatePostStates.composing)
+    await message.answer(
+        "✅ Скрытый текст обновлён.\n\n" + HIDDEN_PART_SETTINGS,
+        reply_markup=build_hidden_part_settings_kb(post_id),
+    )
+
+
+def get_editor_ctx_from_data(data: dict) -> EditorContext:
+    """
+    Безопасно получает EditorContext из FSM data.
+    Работает и со словарём, и с объектом EditorContext.
+    """
+    ctx_data = data.get("editor_context")
+
+    if ctx_data is None:
+        return EditorContext(
+            kind="text", has_media=False, has_text=True,
+            text_was_initial=True, text_added_later=False
+        )
+
+    if isinstance(ctx_data, EditorContext):
+        return ctx_data
+
+    if isinstance(ctx_data, dict):
+        return EditorContext(
+            kind=ctx_data.get("kind", "text"),
+            has_media=bool(ctx_data.get("has_media", False)),
+            has_text=bool(ctx_data.get("has_text", True)),
+            text_was_initial=bool(ctx_data.get("text_was_initial", True)),
+            text_added_later=bool(ctx_data.get("text_added_later", False)),
+        )
+
+    return EditorContext(
+        kind="text", has_media=False, has_text=True,
+        text_was_initial=True, text_added_later=False
+    )

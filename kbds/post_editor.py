@@ -58,30 +58,32 @@ class EditorState:
     # toggles
     hidden: bool = False
     bell: bool = False  # 🔔/🔕 - уведомление при отправке
-    has_url_buttons: bool = False
     reactions: bool = True  # По умолчанию реакции включены
     content_protect: bool = False  # Защита контента (антикопирование)
-    comments: bool = False
+    comments: bool = True
     pin: bool = False  # Закрепить пост
     copy: bool = False
     repost: bool = False
     reply_post: bool = False
 
+    has_url_buttons: bool = False
+    has_hidden_part: bool = False    # Есть скрытое продолжение
+    text_position: str = "bottom"
+
+class HiddenPartCD(CallbackData, prefix="hidden"):
+    """CallbackData для скрытого продолжения."""
+    action: str          # edit_name | edit_text | edit_hidden_text | delete | save | back | skip
+    post_id: int = 0
 
 def _with_check(label: str, enabled: bool) -> str:
     return f"✅ {label}" if enabled else label
 
 
-def build_editor_kb(post_id: int, st: EditorState, ctx: EditorContext) -> InlineKeyboardMarkup:
-    """
-    ВЕРХНИЙ БЛОК зависит от ctx, НИЖНИЙ — общий.
-    """
-
+def build_editor_kb(post_id: int, st: EditorState, ctx: 'EditorContext') -> InlineKeyboardMarkup:
     kb: list[list[InlineKeyboardButton]] = []
 
-    # --------- ВЕРХНИЕ КНОПКИ (по кейсам) ---------
+    # ========== ВЕРХНИЕ КНОПКИ (по типу контента) ==========
 
-    # 1) только фото (без текста)
     if ctx.kind == "photo" and ctx.has_media and not ctx.has_text:
         kb.append([
             InlineKeyboardButton(text="Медиа", callback_data=EditorCD(action="media", post_id=post_id).pack()),
@@ -89,7 +91,6 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: EditorContext) -> Inline
                                  callback_data=EditorCD(action="add_desc", post_id=post_id).pack()),
         ])
 
-    # 2) фото + описание добавлено позже (через кнопку)
     elif ctx.kind == "photo" and ctx.has_media and ctx.has_text and ctx.text_added_later:
         kb.append([
             InlineKeyboardButton(text="Медиа", callback_data=EditorCD(action="media", post_id=post_id).pack()),
@@ -97,7 +98,6 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: EditorContext) -> Inline
                                  callback_data=EditorCD(action="edit_desc", post_id=post_id).pack()),
         ])
 
-    # 3) фото + текст был изначально вместе
     elif ctx.kind == "photo" and ctx.has_media and ctx.has_text and ctx.text_was_initial:
         kb.append([
             InlineKeyboardButton(text="Изменить текст",
@@ -106,7 +106,6 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: EditorContext) -> Inline
                                  callback_data=EditorCD(action="detach_media", post_id=post_id).pack()),
         ])
 
-    # 4) голосовое
     elif ctx.kind == "voice":
         if ctx.has_text:
             kb.append([
@@ -119,8 +118,15 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: EditorContext) -> Inline
                                      callback_data=EditorCD(action="add_desc", post_id=post_id).pack()),
             ])
 
+    elif ctx.kind == "other_media" and ctx.has_media and ctx.has_text:
+        kb.append([
+            InlineKeyboardButton(text="Изменить текст",
+                                 callback_data=EditorCD(action="edit_text", post_id=post_id).pack()),
+            InlineKeyboardButton(text="Открепить медиа",
+                                 callback_data=EditorCD(action="detach_media", post_id=post_id).pack()),
+        ])
+
     else:
-        # fallback: текст без медиа или другое
         kb.append([
             InlineKeyboardButton(text="Редактировать текст",
                                  callback_data=EditorCD(action="edit_text", post_id=post_id).pack()),
@@ -128,9 +134,24 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: EditorContext) -> Inline
                                  callback_data=EditorCD(action="attach_media", post_id=post_id).pack()),
         ])
 
-    # --------- ОБЩИЕ КНОПКИ ---------
+    # ========== КНОПКА ПОЗИЦИИ ТЕКСТА (только для фото/видео с текстом) ==========
+    if ctx.has_media and ctx.has_text and ctx.kind in ("photo", "other_media"):
+        # Показываем ТЕКУЩУЮ позицию и что будет при нажатии
+        if st.text_position == "top":
+            pos_btn_text = "📝 Текст сверху → снизу"
+        else:
+            pos_btn_text = "📝 Текст снизу → сверху"
 
-    # Ряд 1: Колокольчик (уведомление) + Реакции
+        kb.append([
+            InlineKeyboardButton(
+                text=pos_btn_text,
+                callback_data=EditorCD(action="toggle_text_position", post_id=post_id).pack()
+            ),
+        ])
+
+    # ========== ОБЩИЕ КНОПКИ ==========
+
+    # Колокольчик + Реакции
     bell_label = "🔔" if st.bell else "🔕"
     kb.append([
         InlineKeyboardButton(
@@ -143,7 +164,7 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: EditorContext) -> Inline
         ),
     ])
 
-    # Ряд 2: URL-Кнопки
+    # URL-Кнопки
     url_btn_text = "✅ URL-Кнопки" if st.has_url_buttons else "URL-Кнопки"
     kb.append([
         InlineKeyboardButton(
@@ -152,7 +173,7 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: EditorContext) -> Inline
         ),
     ])
 
-    # Ряд 3: Защита контента + Закрепить
+    # Защита контента + Закрепить
     kb.append([
         InlineKeyboardButton(
             text=_with_check("Защита контента", st.content_protect),
@@ -164,7 +185,7 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: EditorContext) -> Inline
         ),
     ])
 
-    # Ряд 4: Комментарии + Ответный пост
+    # Комментарии + Ответный пост
     kb.append([
         InlineKeyboardButton(
             text=_with_check("Комментарии", st.comments),
@@ -176,7 +197,16 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: EditorContext) -> Inline
         ),
     ])
 
-    # Ряд 5: Копировать
+    # Скрытое продолжение
+    hidden_text = "✅ Скрытое продолжение" if st.has_hidden_part else "Скрытое продолжение"
+    kb.append([
+        InlineKeyboardButton(
+            text=hidden_text,
+            callback_data=EditorCD(action="hidden_part", post_id=post_id).pack()
+        ),
+    ])
+
+    # Копировать
     kb.append([
         InlineKeyboardButton(
             text="📋 Копировать",
@@ -184,7 +214,7 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: EditorContext) -> Inline
         ),
     ])
 
-    # Ряд 6: Продолжить
+    # Продолжить
     kb.append([
         InlineKeyboardButton(
             text="Продолжить ➡️",
@@ -331,6 +361,32 @@ def build_url_buttons_prompt_kb(post_id: int, has_buttons: bool = False) -> Inli
 
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
+def build_hidden_part_input_kb(post_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=HiddenPartCD(action="back", post_id=post_id).pack())]
+    ])
+
+
+def build_hidden_part_skip_kb(post_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⬅️ Назад", callback_data=HiddenPartCD(action="back", post_id=post_id).pack()),
+            InlineKeyboardButton(text="Пропустить ➡️", callback_data=HiddenPartCD(action="skip", post_id=post_id).pack()),
+        ]
+    ])
+
+
+def build_hidden_part_settings_kb(post_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Изменить название кнопки", callback_data=HiddenPartCD(action="edit_name", post_id=post_id).pack())],
+        [InlineKeyboardButton(text="📝 Изменить текст", callback_data=HiddenPartCD(action="edit_text", post_id=post_id).pack())],
+        [InlineKeyboardButton(text="🔒 Изменить скрытый текст", callback_data=HiddenPartCD(action="edit_hidden_text", post_id=post_id).pack())],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=HiddenPartCD(action="delete", post_id=post_id).pack())],
+        [InlineKeyboardButton(text="✅ Сохранить и продолжить", callback_data=HiddenPartCD(action="save", post_id=post_id).pack())],
+    ])
+
+
+
 
 def editor_state_to_dict(st: EditorState) -> dict:
     return {
@@ -339,7 +395,6 @@ def editor_state_to_dict(st: EditorState) -> dict:
         "preview_message_id": st.preview_message_id,
         "hidden": st.hidden,
         "bell": st.bell,
-        "has_url_buttons": st.has_url_buttons,
         "reactions": st.reactions,
         "content_protect": st.content_protect,
         "comments": st.comments,
@@ -347,6 +402,9 @@ def editor_state_to_dict(st: EditorState) -> dict:
         "copy": st.copy,
         "repost": st.repost,
         "reply_post": st.reply_post,
+        "has_url_buttons": st.has_url_buttons,
+        "has_hidden_part": st.has_hidden_part,
+        "text_position": st.text_position,
     }
 
 
@@ -357,31 +415,46 @@ def editor_state_from_dict(d: dict) -> EditorState:
         preview_message_id=int(d["preview_message_id"]),
         hidden=bool(d.get("hidden", False)),
         bell=bool(d.get("bell", False)),
-        has_url_buttons=bool(d.get("has_url_buttons", False)),
-        reactions=bool(d.get("reactions", True)),  # По умолчанию True
+        reactions=bool(d.get("reactions", True)),
         content_protect=bool(d.get("content_protect", False)),
-        comments=bool(d.get("comments", False)),
+        comments=bool(d.get("comments", True)),
         pin=bool(d.get("pin", False)),
         copy=bool(d.get("copy", False)),
         repost=bool(d.get("repost", False)),
         reply_post=bool(d.get("reply_post", False)),
+        has_url_buttons=bool(d.get("has_url_buttons", False)),
+        has_hidden_part=bool(d.get("has_hidden_part", False)),
+        text_position=d.get("text_position", "bottom"),
+    )
+
+def editor_ctx_to_dict(ctx: 'EditorContext') -> dict:
+    """Сериализует EditorContext в словарь для FSM."""
+    return {
+        "kind": ctx.kind,
+        "has_media": ctx.has_media,
+        "has_text": ctx.has_text,
+        "text_was_initial": ctx.text_was_initial,
+        "text_added_later": ctx.text_added_later,
+    }
+
+
+def editor_ctx_from_dict(d: dict) -> 'EditorContext':
+    """Десериализует EditorContext из словаря."""
+    return EditorContext(
+        kind=d.get("kind", "text"),
+        has_media=bool(d.get("has_media", False)),
+        has_text=bool(d.get("has_text", True)),
+        text_was_initial=bool(d.get("text_was_initial", True)),
+        text_added_later=bool(d.get("text_added_later", False)),
     )
 
 
 @dataclass
 class EditorContext:
     kind: PostKind
-
-    # есть ли прикреплённое медиа (для text-only = False)
     has_media: bool
-
-    # есть ли текст/описание сейчас (caption/description)
     has_text: bool
-
-    # текст был изначально вместе с медиа? (случай 3)
     text_was_initial: bool
-
-    # текст добавлен позже через "Добавить описание"? (случай 2/4)
     text_added_later: bool
 
 
@@ -403,7 +476,15 @@ def make_ctx_from_message(message: types.Message) -> EditorContext:
             text_was_initial=has_text,
             text_added_later=False
         )
-    # текст без медиа
+    if message.video or message.document or message.animation:
+        has_text = bool(message.caption)
+        return EditorContext(
+            kind="other_media",
+            has_media=True,
+            has_text=has_text,
+            text_was_initial=has_text,
+            text_added_later=False
+        )
     if message.text and not (message.photo or message.voice or message.video or message.document):
         return EditorContext(
             kind="text",

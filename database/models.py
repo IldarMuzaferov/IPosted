@@ -222,6 +222,7 @@ class Post(Base):
     pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # Закрепить
     protected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # Защита контента
     comments_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)  # Комментарии
+    text_position: Mapped[str] = mapped_column(String(10), nullable=False, default="bottom")
     reactions_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)  # Реакции
     is_repost: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # Репост
 
@@ -325,20 +326,16 @@ class PostButton(Base):
 
 
 class PostHiddenPart(Base):
-    """
-    Hidden continuation of post (Скрытое продолжение).
-    Shown only to channel subscribers via bot button.
-    """
     __tablename__ = "post_hidden_parts"
 
     post_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("posts.id", ondelete="CASCADE"), primary_key=True
     )
-    text: Mapped[str] = mapped_column(Text, nullable=False)
+    button_text: Mapped[str] = mapped_column(String(64), nullable=False, default="Читать продолжение")
+    subscriber_text: Mapped[str] = mapped_column(Text, nullable=False)
+    nonsubscriber_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # Relationships
     post: Mapped["Post"] = relationship(back_populates="hidden_part")
-
 
 # =============================================================================
 # POST TARGETS (per-channel publication)
