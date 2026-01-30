@@ -1282,11 +1282,7 @@ async def copy_apply(call: types.CallbackQuery, callback_data: CopyPostCD, state
     data = await state.get_data()
 
     raw_selected = data.get("copy_selected_ids") or []
-    if isinstance(raw_selected, list):
-        selected_ids = set(raw_selected)
-    else:
-        selected_ids = set(raw_selected)
-
+    selected_ids = set(raw_selected) if isinstance(raw_selected, list) else set(raw_selected)
     if not selected_ids:
         await call.answer("Выберите хотя бы один канал", show_alert=True)
         return
@@ -1300,6 +1296,13 @@ async def copy_apply(call: types.CallbackQuery, callback_data: CopyPostCD, state
         channel_ids=selected_ids,
     )
     await session.commit()
+
+    raw_current = data.get("selected_channel_ids") or []
+    current_ids = set(raw_current) if isinstance(raw_current, list) else set(raw_current)
+
+    new_ids = current_ids | selected_ids
+    await state.update_data(selected_channel_ids=list(new_ids))
+
 
     # Возвращаемся к редактору
     st = editor_state_from_dict(data["editor"])
@@ -1778,7 +1781,7 @@ async def publish_confirm_yes(call: types.CallbackQuery, callback_data: PublishC
         dt_text = _fmt_ru_dt(scheduled_dt) if scheduled_dt else "сразу"
         text = (
             f"Пост опубликован в канал {channel_names} ({dt_text}).\n\n"
-            f"Пост будет удален через {delete_text}."
+            f'Пост будет удален через {delete_text}.'
         )
     else:
         dt_text = _fmt_ru_dt(scheduled_dt)
@@ -1786,7 +1789,6 @@ async def publish_confirm_yes(call: types.CallbackQuery, callback_data: PublishC
             f"Пост запланирован в канал {channel_names} и будет опубликован {dt_text}.\n\n"
             f"Пост будет удален через {delete_text}."
         )
-
     await call.message.answer(text, reply_markup=ik_finish_nav())
     await state.set_state(CreatePostStates.composing)
     await call.answer()
@@ -2327,3 +2329,18 @@ def get_editor_ctx_from_data(data: dict) -> EditorContext:
         kind="text", has_media=False, has_text=True,
         text_was_initial=True, text_added_later=False
     )
+
+@user_private_router.callback_query(F.data == "finish:create")
+async def finish_create(call: types.CallbackQuery, state: FSMContext, session: AsyncSession):
+    # чтобы не тащить старые publish_* и editor_* данные
+    await state.clear()
+
+    # запускаем ровно то же, что "Создать пост"
+    await state.set_state(CreatePostStates.choosing_channels)
+    await state.update_data(selected_channel_ids=set(), last_scope="root")
+
+    await call.message.answer(
+        "Куда будем публиковать пост?",
+        reply_markup=ik_create_root_menu(),
+    )
+    await call.answer()

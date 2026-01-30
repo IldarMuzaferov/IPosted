@@ -278,7 +278,7 @@ def ik_confirm_publish(post_id: int) -> InlineKeyboardMarkup:
 def ik_finish_nav() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="Контент план", callback_data=NavCD(action="content_plan").pack()),
-            InlineKeyboardButton(text="Создать пост", callback_data=NavCD(action="create_post").pack()),
+            InlineKeyboardButton(text="Контент план", callback_data="finish:content_plan"),
+            InlineKeyboardButton(text="Создать", callback_data="finish:create"),
         ]
     ])
