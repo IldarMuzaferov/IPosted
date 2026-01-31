@@ -67,3 +67,61 @@ class CreatePostCD(CallbackData, prefix="cp"):
     folder_id: int = 0
     channel_id: int = 0
 
+#======================================================================================
+class SettingsStates(StatesGroup):
+    waiting_channel_from_settings = State()
+    waiting_folder_name = State()
+    waiting_folder_rename = State()
+    choosing_folder_channels = State()
+
+class SettingsCD(CallbackData, prefix="settings"):
+    """Главное меню настроек."""
+    action: str  # main | add_channel | timezone | folders | back
+
+
+class TimezoneCD(CallbackData, prefix="tz"):
+    """Выбор часового пояса."""
+    action: str  # select | back
+    tz: str = ""  # IANA timezone name
+
+
+class FoldersCD(CallbackData, prefix="folders"):
+    """Управление папками."""
+    action: str  # list | create | select | back
+    folder_id: int = 0
+
+
+class FolderEditCD(CallbackData, prefix="folder_edit"):
+    """Редактирование папки."""
+    action: str  # rename | channels | delete | back | save
+    folder_id: int = 0
+
+
+class FolderChannelsCD(CallbackData, prefix="folder_ch"):
+    """Выбор каналов для папки."""
+    action: str  # toggle | select_all | deselect_all | done | back
+    folder_id: int = 0
+    channel_id: int = 0
+
+TIMEZONES = [
+    ("Europe/Moscow", "Москва", "GMT+3", 3),
+    ("Europe/London", "Лондон", "GMT+0", 0),
+    ("Europe/Paris", "Париж", "GMT+1", 1),
+    ("Europe/Berlin", "Берлин", "GMT+1", 1),
+    ("Europe/Kiev", "Киев", "GMT+2", 2),
+    ("Europe/Istanbul", "Стамбул", "GMT+3", 3),
+    ("Asia/Dubai", "Дубай", "GMT+4", 4),
+    ("Asia/Tashkent", "Ташкент", "GMT+5", 5),
+    ("Asia/Almaty", "Алматы", "GMT+6", 6),
+    ("Asia/Bangkok", "Бангкок", "GMT+7", 7),
+    ("Asia/Shanghai", "Шанхай", "GMT+8", 8),
+    ("Asia/Tokyo", "Токио", "GMT+9", 9),
+    ("Australia/Sydney", "Сидней", "GMT+10", 10),
+    ("Pacific/Auckland", "Окленд", "GMT+12", 12),
+    ("America/New_York", "Нью-Йорк", "GMT-5", -5),
+    ("America/Chicago", "Чикаго", "GMT-6", -6),
+    ("America/Denver", "Денвер", "GMT-7", -7),
+    ("America/Los_Angeles", "Лос-Анджелес", "GMT-8", -8),
+    ("America/Anchorage", "Аляска", "GMT-9", -9),
+    ("Pacific/Honolulu", "Гавайи", "GMT-10", -10),
+]

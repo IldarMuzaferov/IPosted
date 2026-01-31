@@ -16,14 +16,14 @@ from database.models import TgMemberStatus, PostEventType
 from database.orm_query import orm_get_user_channels, orm_get_free_channels_for_user, orm_get_folder_channels, \
     orm_get_user_folders, orm_add_channel_admin, orm_upsert_channel, orm_upsert_user, orm_create_post_from_message, \
     orm_edit_post_text, orm_add_media_to_post, orm_get_post_full, orm_set_target_autodelete, orm_publish_target_now, \
-    orm_log_post_event, orm_schedule_target, orm_set_post_flags, orm_set_reply_target_forwarded
+    orm_log_post_event, orm_schedule_target, orm_set_post_flags, orm_set_reply_target_forwarded, orm_get_user
 from filters.chat_types import ChatTypeFilter
 from kbds.callbacks import CreatePostCD, CreatePostStates, ConnectChannelStates, EditTextStates, AttachMediaStates, \
     UrlButtonsStates, PublishStates, PublishCD
 from kbds.inline import get_callback_btns, get_url_btns, get_inlineMix_btns, ik_channels_picker, ik_create_post_menu, \
     ik_create_root_menu, ik_channels_menu, ik_folders_menu, ik_after_channel_connected, ik_folders_empty, \
     ik_folder_channels, ik_folders_list, ik_edit_text_controls, ik_attach_media_controls, ik_send_mode, ik_delete_after, \
-    ik_confirm_publish, ik_finish_nav
+    ik_confirm_publish, ik_finish_nav, build_settings_main_kb
 from datetime import datetime
 # from main import bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -94,7 +94,8 @@ COMMENTS_WARNING = (
 )
 
 @user_private_router.message(CommandStart())
-async def cmd_start(message: types.Message, session: AsyncSession):
+async def cmd_start(message: types.Message, session: AsyncSession, state: FSMContext):
+    await state.clear()
     # опционально: регистрация/обновление юзера в БД
     # await orm_upsert_user(
     #     session,
@@ -2712,3 +2713,17 @@ async def reply_post_content_plan(call: types.CallbackQuery, callback_data: Repl
     """Выбор из контент-плана - пока заглушка."""
     await call.answer("🚧 Выбор из контент-плана будет добавлен позже", show_alert=True)
 
+#=============================================================================================
+@user_private_router.message(F.text == "Настройки")
+async def settings_reply_button(message: types.Message, state: FSMContext, session: AsyncSession):
+    await state.clear()
+    user = await orm_get_user(session, user_id=message.from_user.id)
+    user_tz = user.timezone if user else "Europe/Moscow"
+
+    await message.answer(
+        "⚙️ <b>НАСТРОЙКИ</b>\n\n"
+        "В этом разделе вы можете настроить работу с ботом, "
+        "с отдельным каналом, а также добавить новый канал в Posted.",
+        parse_mode="HTML",
+        reply_markup=build_settings_main_kb(user_tz),
+    )

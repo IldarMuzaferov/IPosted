@@ -2,6 +2,7 @@ from create_bot import dp, bot
 import asyncio
 
 from handlers.hidden_callback import hidden_callback_router
+from handlers.settings_handlers import settings_router
 from middlewares.db import DataBaseSession
 from database.engine import create_db, drop_db, session_maker
 from handlers.user_private import user_private_router
@@ -9,7 +10,7 @@ from scheduler_worker import scheduler_loop
 
 dp.include_router(user_private_router)
 dp.include_router(hidden_callback_router)
-# dp.include_router(admin_router)
+dp.include_router(settings_router)
 
 
 async def on_startup():
