@@ -16,7 +16,7 @@ from database.models import TgMemberStatus, PostEventType
 from database.orm_query import orm_get_user_channels, orm_get_free_channels_for_user, orm_get_folder_channels, \
     orm_get_user_folders, orm_add_channel_admin, orm_upsert_channel, orm_upsert_user, orm_create_post_from_message, \
     orm_edit_post_text, orm_add_media_to_post, orm_get_post_full, orm_set_target_autodelete, orm_publish_target_now, \
-    orm_log_post_event, orm_schedule_target, orm_set_post_flags
+    orm_log_post_event, orm_schedule_target, orm_set_post_flags, orm_set_reply_target_forwarded
 from filters.chat_types import ChatTypeFilter
 from kbds.callbacks import CreatePostCD, CreatePostStates, ConnectChannelStates, EditTextStates, AttachMediaStates, \
     UrlButtonsStates, PublishStates, PublishCD
@@ -36,6 +36,9 @@ from database.orm_query import orm_get_all_user_channels, orm_copy_post_to_chann
 from kbds.post_editor import HiddenPartCD, build_hidden_part_input_kb, build_hidden_part_skip_kb, build_hidden_part_settings_kb
 from kbds.callbacks import HiddenPartStates
 from database.orm_query import orm_get_hidden_part, orm_save_hidden_part, orm_delete_hidden_part, orm_set_post_text_position
+from kbds.post_editor import ReplyPostCD, build_reply_post_setup_kb, build_reply_post_settings_kb, build_reply_post_input_kb
+from kbds.callbacks import ReplyPostStates
+from database.orm_query import orm_save_reply_target, orm_delete_reply_target
 
 
 from datetime import datetime, timedelta
@@ -619,12 +622,13 @@ async def on_compose_any_message(message: types.Message, state: FSMContext, sess
     mode = _detect_editor_mode(message)
 
     # 3) привязать editor state к этому превью
+    selected_ids = set(data.get("selected_channel_ids") or [])
     st = EditorState(
         post_id=post_id,
         preview_chat_id=message.chat.id,
         preview_message_id=res.message_id,
-    )
-    # Создаем контекст для редактора
+        selected_channels_count=len(selected_ids) if selected_ids else 1,
+    )    # Создаем контекст для редактора
     ctx = make_ctx_from_message(message)
     await state.update_data(
         editor=editor_state_to_dict(st),
@@ -1596,12 +1600,25 @@ async def editor_continue(call: types.CallbackQuery, callback_data: EditorCD, st
     await orm_set_post_flags(
         session,
         post_id=st.post_id,
-        silent=not st.bell,              # bell=True → silent=False
+        silent=not st.bell,
         pinned=st.pin,
         protected=st.content_protect,
         reactions_enabled=st.reactions,
         comments_enabled=st.comments,
     )
+
+    # ========== Сохраняем reply_target если включен ответный пост ==========
+    if st.reply_post and st.reply_to_message_id and st.reply_to_channel_id:
+        post_full = await orm_get_post_full(session, post_id=st.post_id)
+        if post_full and post_full.targets:
+            await orm_set_reply_target_forwarded(
+                session,
+                actor_user_id=call.from_user.id,  # <-- ДОБАВИТЬ!
+                target_id=post_full.targets[0].id,
+                reply_to_channel_id=st.reply_to_channel_id,
+                reply_to_message_id=st.reply_to_message_id,
+            )
+
     await session.commit()
     # =====================================================
 
@@ -2344,3 +2361,354 @@ async def finish_create(call: types.CallbackQuery, state: FSMContext, session: A
         reply_markup=ik_create_root_menu(),
     )
     await call.answer()
+
+REPLY_POST_INTRO = (
+    "📨 <b>ОТВЕТНЫЙ ПОСТ</b>\n\n"
+    "С помощью функции «Ответный пост» вы можете отправить публикацию "
+    "ответным постом на уже вышедшее сообщение.\n\n"
+    "Перешлите в диалог с ботом сообщение из канала, чтобы сделать ответный пост "
+    "на это сообщение, или выберите пост из контент-плана."
+)
+
+REPLY_POST_SUCCESS = (
+    "✅ Ответный пост настроен!\n\n"
+    "Ваш пост выйдет ответом на выбранное сообщение."
+)
+
+REPLY_POST_WRONG_CHANNEL = (
+    "❌ Это сообщение из другого канала.\n\n"
+    "Пожалуйста, перешлите сообщение из канала, в который вы хотите опубликовать пост."
+)
+
+REPLY_POST_NOT_FORWARDED = (
+    "❌ Пожалуйста, перешлите сообщение из канала.\n\n"
+    "Просто пересланное сообщение, не копию текста."
+)
+
+
+@user_private_router.callback_query(ReplyPostCD.filter(F.action == "setup"))
+async def reply_post_setup(call: types.CallbackQuery, callback_data: ReplyPostCD, state: FSMContext,
+                           session: AsyncSession):
+    """Нажатие на кнопку 'Ответный пост'."""
+    data = await state.get_data()
+    if "editor" not in data:
+        await call.answer("Редактор не активен", show_alert=True)
+        return
+
+    st = editor_state_from_dict(data["editor"])
+    if int(callback_data.post_id) != st.post_id:
+        await call.answer("Устаревшая кнопка", show_alert=True)
+        return
+
+    # Проверяем, есть ли уже настроенный ответный пост
+    if st.reply_post and st.reply_to_message_id:
+        # Уже настроен - показываем настройки
+        await call.message.answer(
+            f"📨 <b>Ответный пост настроен</b>\n\n"
+            f"Ваш пост выйдет ответом на сообщение #{st.reply_to_message_id}",
+            parse_mode="HTML",
+            reply_markup=build_reply_post_settings_kb(st.post_id),
+        )
+    else:
+        # Не настроен - показываем инструкцию
+        await state.set_state(ReplyPostStates.waiting_forward)
+        await state.update_data(reply_post_post_id=st.post_id)
+
+        # Получаем channel_id для проверки (берём из первого target)
+        # Предполагаем что selected_channel_ids сохранён в state
+
+        raw_ids = data.get("selected_channel_ids") or []
+
+        # нормализуем к list
+        if isinstance(raw_ids, set):
+            selected_channel_ids = list(raw_ids)
+        elif isinstance(raw_ids, (list, tuple)):
+            selected_channel_ids = list(raw_ids)
+        else:
+            selected_channel_ids = [raw_ids]
+
+        selected_channel_ids = [int(x) for x in selected_channel_ids if x is not None]
+        if len(selected_channel_ids) == 1:
+            await state.update_data(reply_target_channel_id=selected_channel_ids[0])
+        else:
+            await state.update_data(reply_target_channel_id=None)
+            await call.answer(
+                "Ответный пост можно сделать только для одного канала",
+                show_alert=True,
+            )
+            return
+        msg = await call.message.answer(
+            REPLY_POST_INTRO,
+            parse_mode="HTML",
+            reply_markup=build_reply_post_input_kb(st.post_id),
+        )
+        await state.update_data(reply_post_ui_msg_id=msg.message_id)
+
+    await call.answer()
+
+
+# =============================================================================
+# ПОЛУЧЕНИЕ ПЕРЕСЛАННОГО СООБЩЕНИЯ
+# =============================================================================
+
+@user_private_router.message(StateFilter(ReplyPostStates.waiting_forward))
+async def reply_post_receive_forward(message: types.Message, state: FSMContext, session: AsyncSession):
+    """Пользователь переслал сообщение для ответного поста."""
+    data = await state.get_data()
+    post_id = data.get("reply_post_post_id")
+    target_channel_id = data.get("reply_target_channel_id")
+    ui_msg_id = data.get("reply_post_ui_msg_id")
+
+    # Проверяем что это пересланное сообщение
+    if not message.forward_from_chat:
+        await message.answer(
+            REPLY_POST_NOT_FORWARDED,
+            parse_mode="HTML",
+            reply_markup=build_reply_post_input_kb(post_id),
+        )
+        return
+
+    # Проверяем что это из нужного канала
+    forward_chat_id = message.forward_from_chat.id
+    forward_message_id = message.forward_from_message_id
+
+    if target_channel_id and forward_chat_id != target_channel_id:
+        await message.answer(
+            REPLY_POST_WRONG_CHANNEL,
+            parse_mode="HTML",
+            reply_markup=build_reply_post_input_kb(post_id),
+        )
+        return
+
+    # Сохраняем в EditorState
+    st = editor_state_from_dict(data["editor"])
+    st.reply_post = True
+    st.reply_to_channel_id = forward_chat_id
+    st.reply_to_message_id = forward_message_id
+    await state.update_data(editor=editor_state_to_dict(st))
+
+    # Возвращаемся в composing
+    await state.set_state(CreatePostStates.composing)
+
+    # Удаляем UI сообщение
+    if ui_msg_id:
+        try:
+            await message.bot.delete_message(chat_id=message.chat.id, message_id=int(ui_msg_id))
+        except Exception:
+            pass
+
+    # Удаляем пересланное сообщение
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    # Пересоздаём превью с показом ответного поста
+    await _recreate_preview_with_reply(message, state, session, st, forward_chat_id, forward_message_id)
+
+    await message.answer("✅ Ответный пост настроен!", reply_markup=types.ReplyKeyboardRemove())
+
+
+async def _recreate_preview_with_reply(
+        message: types.Message,
+        state: FSMContext,
+        session: AsyncSession,
+        st: EditorState,
+        reply_channel_id: int,
+        reply_message_id: int,
+):
+    """
+    Пересоздаёт превью поста с показом что это ответ.
+    Показывает сообщение-источник и под ним наш пост.
+    """
+    data = await state.get_data()
+    editor_ctx = get_editor_ctx_from_data(data)
+
+    # 1) Пересылаем сообщение-источник (на которое отвечаем)
+    try:
+        source_msg = await message.bot.forward_message(
+            chat_id=message.chat.id,
+            from_chat_id=reply_channel_id,
+            message_id=reply_message_id,
+        )
+
+        # Отправляем текст что это ответ
+        await message.answer(
+            "↩️ <i>Ваш пост выйдет ответом на сообщение выше</i>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        # Если не удалось переслать - просто показываем текст
+        await message.answer(
+            f"↩️ <i>Ваш пост выйдет ответом на сообщение #{reply_message_id}</i>",
+            parse_mode="HTML",
+        )
+
+    # 2) Копируем наше превью
+    try:
+        res = await message.bot.copy_message(
+            chat_id=message.chat.id,
+            from_chat_id=st.preview_chat_id,
+            message_id=st.preview_message_id,
+        )
+        new_preview_id = res.message_id
+
+        # 3) Строим клавиатуру
+        editor_kb = build_editor_kb(st.post_id, st, ctx=editor_ctx)
+        existing_buttons = await orm_get_post_buttons(session, post_id=st.post_id)
+        if existing_buttons:
+            combined_kb = merge_url_and_editor_kb(existing_buttons, editor_kb)
+        else:
+            combined_kb = editor_kb
+
+        # 4) Добавляем клавиатуру
+        await message.bot.edit_message_reply_markup(
+            chat_id=message.chat.id,
+            message_id=new_preview_id,
+            reply_markup=combined_kb,
+        )
+
+        # 5) Удаляем старое превью
+        try:
+            await message.bot.delete_message(
+                chat_id=st.preview_chat_id,
+                message_id=st.preview_message_id,
+            )
+        except Exception:
+            pass
+
+        # 6) Обновляем state
+        st.preview_message_id = new_preview_id
+        st.preview_chat_id = message.chat.id
+        await state.update_data(editor=editor_state_to_dict(st))
+
+    except Exception as e:
+        # Если не удалось скопировать - обновляем клавиатуру на месте
+        editor_kb = build_editor_kb(st.post_id, st, ctx=editor_ctx)
+        existing_buttons = await orm_get_post_buttons(session, post_id=st.post_id)
+        if existing_buttons:
+            combined_kb = merge_url_and_editor_kb(existing_buttons, editor_kb)
+        else:
+            combined_kb = editor_kb
+
+        try:
+            await message.bot.edit_message_reply_markup(
+                chat_id=st.preview_chat_id,
+                message_id=st.preview_message_id,
+                reply_markup=combined_kb,
+            )
+        except Exception:
+            pass
+
+
+# =============================================================================
+# КНОПКА "НАЗАД"
+# =============================================================================
+
+@user_private_router.callback_query(ReplyPostCD.filter(F.action == "back"))
+async def reply_post_back(call: types.CallbackQuery, callback_data: ReplyPostCD, state: FSMContext):
+    """Возврат из настройки ответного поста."""
+    await state.set_state(CreatePostStates.composing)
+
+    # Очищаем временные данные
+    await state.update_data(
+        reply_post_ui_msg_id=None,
+        reply_target_channel_id=None,
+    )
+
+    await call.message.delete()
+    await call.answer()
+
+
+# =============================================================================
+# УДАЛЕНИЕ ОТВЕТНОГО ПОСТА
+# =============================================================================
+
+@user_private_router.callback_query(ReplyPostCD.filter(F.action == "remove"))
+async def reply_post_remove(call: types.CallbackQuery, callback_data: ReplyPostCD, state: FSMContext,
+                            session: AsyncSession):
+    """Удаление настройки ответного поста."""
+    data = await state.get_data()
+
+    if "editor" not in data:
+        await call.answer("Редактор не активен", show_alert=True)
+        return
+
+    st = editor_state_from_dict(data["editor"])
+
+    # Сбрасываем флаги
+    st.reply_post = False
+    st.reply_to_channel_id = None
+    st.reply_to_message_id = None
+    await state.update_data(editor=editor_state_to_dict(st))
+
+    # Обновляем клавиатуру превью
+    editor_ctx = get_editor_ctx_from_data(data)
+    editor_kb = build_editor_kb(st.post_id, st, ctx=editor_ctx)
+    existing_buttons = await orm_get_post_buttons(session, post_id=st.post_id)
+    if existing_buttons:
+        combined_kb = merge_url_and_editor_kb(existing_buttons, editor_kb)
+    else:
+        combined_kb = editor_kb
+
+    try:
+        await call.bot.edit_message_reply_markup(
+            chat_id=st.preview_chat_id,
+            message_id=st.preview_message_id,
+            reply_markup=combined_kb,
+        )
+    except TelegramBadRequest:
+        pass
+
+    await call.message.delete()
+    await call.answer("Ответный пост отключен")
+
+
+# =============================================================================
+# СОХРАНЕНИЕ ОТВЕТНОГО ПОСТА
+# =============================================================================
+
+@user_private_router.callback_query(ReplyPostCD.filter(F.action == "save"))
+async def reply_post_save(call: types.CallbackQuery, callback_data: ReplyPostCD, state: FSMContext,
+                          session: AsyncSession):
+    """Сохранить и вернуться к редактору."""
+    await state.set_state(CreatePostStates.composing)
+    await call.message.delete()
+    await call.answer("Сохранено")
+
+
+# =============================================================================
+# ИЗМЕНЕНИЕ ОТВЕТНОГО ПОСТА
+# =============================================================================
+
+@user_private_router.callback_query(ReplyPostCD.filter(F.action == "change"))
+async def reply_post_change(call: types.CallbackQuery, callback_data: ReplyPostCD, state: FSMContext):
+    """Изменить ответный пост - заново показать инструкцию."""
+    data = await state.get_data()
+    st = editor_state_from_dict(data["editor"])
+
+    await state.set_state(ReplyPostStates.waiting_forward)
+    await state.update_data(reply_post_post_id=st.post_id)
+
+    selected_channel_ids = data.get("selected_channel_ids", [])
+    if selected_channel_ids:
+        await state.update_data(reply_target_channel_id=selected_channel_ids[0])
+
+    await call.message.edit_text(
+        REPLY_POST_INTRO,
+        parse_mode="HTML",
+        reply_markup=build_reply_post_input_kb(st.post_id),
+    )
+    await state.update_data(reply_post_ui_msg_id=call.message.message_id)
+    await call.answer()
+
+
+# =============================================================================
+# КОНТЕНТ-ПЛАН (заглушка)
+# =============================================================================
+
+@user_private_router.callback_query(ReplyPostCD.filter(F.action == "content_plan"))
+async def reply_post_content_plan(call: types.CallbackQuery, callback_data: ReplyPostCD, state: FSMContext):
+    """Выбор из контент-плана - пока заглушка."""
+    await call.answer("🚧 Выбор из контент-плана будет добавлен позже", show_alert=True)
+

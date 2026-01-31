@@ -47,6 +47,11 @@ class PublishCD(CallbackData, prefix="pub"):
 class NavCD(CallbackData, prefix="nav"):
     action: str
 
+class ReplyPostStates(StatesGroup):
+    """Состояния для настройки ответного поста."""
+    waiting_forward = State()         # Ожидание пересланного сообщения
+    choosing_from_plan = State()
+
 class CreatePostCD(CallbackData, prefix="cp"):
     """
     action:

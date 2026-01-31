@@ -69,6 +69,11 @@ class EditorState:
     has_url_buttons: bool = False
     has_hidden_part: bool = False    # Есть скрытое продолжение
     text_position: str = "bottom"
+    reply_to_channel_id: int | None = None
+    reply_to_message_id: int | None = None
+
+    # Количество выбранных каналов (нужно для скрытия кнопок)
+    selected_channels_count: int = 1
 
 class HiddenPartCD(CallbackData, prefix="hidden"):
     """CallbackData для скрытого продолжения."""
@@ -186,16 +191,22 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: 'EditorContext') -> Inli
     ])
 
     # Комментарии + Ответный пост
-    kb.append([
-        InlineKeyboardButton(
-            text=_with_check("Комментарии", st.comments),
-            callback_data=EditorCD(action="toggle", post_id=post_id, key="comments").pack()
-        ),
-        InlineKeyboardButton(
-            text=_with_check("Ответный пост", st.reply_post),
-            callback_data=EditorCD(action="toggle", post_id=post_id, key="reply_post").pack()
-        ),
-    ])
+    comments_btn = InlineKeyboardButton(
+        text=_with_check("Комментарии", st.comments),
+        callback_data=EditorCD(action="toggle", post_id=post_id, key="comments").pack()
+    )
+
+    # Ответный пост показываем только если выбран 1 канал
+    if st.selected_channels_count == 1:
+        reply_text = "✅ Ответный пост" if st.reply_post else "Ответный пост"
+        reply_btn = InlineKeyboardButton(
+            text=reply_text,
+            callback_data=ReplyPostCD(action="setup", post_id=post_id).pack()
+        )
+        kb.append([comments_btn, reply_btn])
+    else:
+        # Если несколько каналов - только комментарии
+        kb.append([comments_btn])
 
     # Скрытое продолжение
     hidden_text = "✅ Скрытое продолжение" if st.has_hidden_part else "Скрытое продолжение"
@@ -207,12 +218,13 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: 'EditorContext') -> Inli
     ])
 
     # Копировать
-    kb.append([
-        InlineKeyboardButton(
-            text="📋 Копировать",
-            callback_data=EditorCD(action="copy_to_channels", post_id=post_id).pack()
-        ),
-    ])
+    if not st.reply_post:
+        kb.append([
+            InlineKeyboardButton(
+                text="📋 Копировать",
+                callback_data=EditorCD(action="copy_to_channels", post_id=post_id).pack()
+            ),
+        ])
 
     # Продолжить
     kb.append([
@@ -405,6 +417,9 @@ def editor_state_to_dict(st: EditorState) -> dict:
         "has_url_buttons": st.has_url_buttons,
         "has_hidden_part": st.has_hidden_part,
         "text_position": st.text_position,
+        "reply_to_channel_id": st.reply_to_channel_id,
+        "reply_to_message_id": st.reply_to_message_id,
+        "selected_channels_count": st.selected_channels_count,
     }
 
 
@@ -425,6 +440,9 @@ def editor_state_from_dict(d: dict) -> EditorState:
         has_url_buttons=bool(d.get("has_url_buttons", False)),
         has_hidden_part=bool(d.get("has_hidden_part", False)),
         text_position=d.get("text_position", "bottom"),
+        reply_to_channel_id = d.get("reply_to_channel_id"),
+        reply_to_message_id = d.get("reply_to_message_id"),
+        selected_channels_count = int(d.get("selected_channels_count", 1)),
     )
 
 def editor_ctx_to_dict(ctx: 'EditorContext') -> dict:
@@ -457,6 +475,10 @@ class EditorContext:
     text_was_initial: bool
     text_added_later: bool
 
+class ReplyPostCD(CallbackData, prefix="reply"):
+    """CallbackData для ответного поста."""
+    action: str  # setup | content_plan | back | remove
+    post_id: int = 0
 
 def make_ctx_from_message(message: types.Message) -> EditorContext:
     if message.voice:
@@ -501,3 +523,48 @@ def make_ctx_from_message(message: types.Message) -> EditorContext:
         text_was_initial=bool(message.caption),
         text_added_later=False
     )
+
+def build_reply_post_setup_kb(post_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура для настройки ответного поста."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="📋 Выбрать пост из контент плана",
+            callback_data=ReplyPostCD(action="content_plan", post_id=post_id).pack()
+        )],
+        [InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=ReplyPostCD(action="back", post_id=post_id).pack()
+        )],
+    ])
+
+
+def build_reply_post_settings_kb(post_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура настроек когда ответный пост уже выбран."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🔄 Изменить",
+            callback_data=ReplyPostCD(action="change", post_id=post_id).pack()
+        )],
+        [InlineKeyboardButton(
+            text="🗑 Удалить",
+            callback_data=ReplyPostCD(action="remove", post_id=post_id).pack()
+        )],
+        [InlineKeyboardButton(
+            text="✅ Сохранить",
+            callback_data=ReplyPostCD(action="save", post_id=post_id).pack()
+        )],
+    ])
+
+
+def build_reply_post_input_kb(post_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура во время ожидания пересланного сообщения."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="📋 Выбрать пост из контент плана",
+            callback_data=ReplyPostCD(action="content_plan", post_id=post_id).pack()
+        )],
+        [InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=ReplyPostCD(action="back", post_id=post_id).pack()
+        )],
+    ])

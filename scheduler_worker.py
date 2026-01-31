@@ -84,6 +84,9 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
     text_position = getattr(post, 'text_position', 'bottom') or 'bottom'
     show_caption_above = (text_position == "top")
     sent_ids = []
+    reply_to_message_id = None
+    if t_full.reply:
+        reply_to_message_id = t_full.reply.reply_to_message_id
 
     if post.media and len(post.media) > 1:
         media_sorted = sorted(post.media, key=lambda m: int(m.order_index))
@@ -100,6 +103,7 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
             media=input_media,
             disable_notification=bool(post.silent),
             protect_content=bool(post.protected),
+            reply_to_message_id=reply_to_message_id,
         )
         sent_ids = [m.message_id for m in msgs]
 
@@ -133,7 +137,6 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
     if post.media and len(post.media) == 1:
         m = post.media[0]
         mt = m.media_type
-
         caption = text if text else None
 
         if mt == MediaType.photo:
@@ -145,6 +148,7 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
                 reply_markup=kb,
                 disable_notification=bool(post.silent),
                 protect_content=bool(post.protected),
+                reply_to_message_id=reply_to_message_id,
             )
         elif mt == MediaType.video:
             msg = await bot.send_video(
@@ -155,6 +159,7 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
                 reply_markup=kb,
                 disable_notification=bool(post.silent),
                 protect_content=bool(post.protected),
+                reply_to_message_id=reply_to_message_id,
             )
         elif mt == MediaType.document:
             msg = await bot.send_document(
@@ -164,6 +169,7 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
                 reply_markup=kb,
                 disable_notification=bool(post.silent),
                 protect_content=bool(post.protected),
+                reply_to_message_id=reply_to_message_id,
             )
         elif mt == MediaType.gif:
             msg = await bot.send_animation(
@@ -174,6 +180,8 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
                 reply_markup=kb,
                 disable_notification=bool(post.silent),
                 protect_content=bool(post.protected),
+                reply_to_message_id=reply_to_message_id,
+
             )
         elif mt == MediaType.voice:
             msg = await bot.send_voice(
@@ -183,6 +191,8 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
                 reply_markup=kb,
                 disable_notification=bool(post.silent),
                 protect_content=bool(post.protected),
+                reply_to_message_id=reply_to_message_id,
+
             )
         else:
             msg = await bot.send_document(
@@ -192,6 +202,8 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
                 reply_markup=kb,
                 disable_notification=bool(post.silent),
                 protect_content=bool(post.protected),
+                reply_to_message_id=reply_to_message_id,
+
             )
 
         sent_ids.append(msg.message_id)
@@ -218,6 +230,7 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
         reply_markup=kb,
         disable_notification=bool(post.silent),
         protect_content=bool(post.protected),
+        reply_to_message_id=reply_to_message_id,
     )
     sent_ids.append(msg.message_id)
 

@@ -1681,3 +1681,46 @@ async def orm_get_post_with_channel(session: AsyncSession, *, post_id: int):
     )
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
+
+async def orm_save_reply_target(
+        session: AsyncSession,
+        *,
+        target_id: int,
+        reply_type: str,
+        reply_to_channel_id: int,
+        reply_to_message_id: int,
+        source_target_id: int | None = None,
+) -> None:
+    """Сохраняет настройки ответного поста."""
+    from database.models import ReplyTarget, ReplyType
+
+    existing = await session.get(ReplyTarget, target_id)
+
+    if existing:
+        existing.reply_type = ReplyType(reply_type)
+        existing.reply_to_channel_id = reply_to_channel_id
+        existing.reply_to_message_id = reply_to_message_id
+        existing.source_target_id = source_target_id
+    else:
+        reply_target = ReplyTarget(
+            target_id=target_id,
+            reply_type=ReplyType(reply_type),
+            reply_to_channel_id=reply_to_channel_id,
+            reply_to_message_id=reply_to_message_id,
+            source_target_id=source_target_id,
+        )
+        session.add(reply_target)
+
+    await session.flush()
+
+
+async def orm_delete_reply_target(session: AsyncSession, *, target_id: int) -> None:
+    """Удаляет настройки ответного поста."""
+    from database.models import ReplyTarget
+    from sqlalchemy import delete
+
+    await session.execute(
+        delete(ReplyTarget).where(ReplyTarget.target_id == target_id)
+    )
+    await session.flush()
