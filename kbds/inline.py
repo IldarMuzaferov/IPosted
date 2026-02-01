@@ -2,10 +2,12 @@ from aiogram.types import InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from kbds.callbacks import CreatePostCD, PublishCD, NavCD, TIMEZONES, SettingsCD, TimezoneCD, FolderChannelsCD, \
-    FolderEditCD, FoldersCD
+    FolderEditCD, FoldersCD, ContentPlanCD, ContentPlanCalendarCD, ContentPlanDayCD, format_date_short, \
+    ContentPlanPostCD, MONTH_NAMES, WEEKDAY_NAMES, format_date_medium
 from kbds.post_editor import EditTextCD
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from zoneinfo import ZoneInfo
+import calendar
 
 def get_callback_btns(
         *,
@@ -506,3 +508,372 @@ def build_back_to_settings_kb() -> InlineKeyboardMarkup:
             callback_data=SettingsCD(action="main").pack()
         )],
     ])
+
+#========================================================================================
+#Content plan
+
+def build_content_plan_main_kb(folders: list, has_no_folder_channels: bool) -> InlineKeyboardMarkup:
+    """
+    Главное меню: выбор папки или каналов.
+    """
+    kb = []
+
+    # Папки
+    for folder in folders:
+        kb.append([InlineKeyboardButton(
+            text=f"📁 {folder.title}",
+            callback_data=ContentPlanCD(action="folder", folder_id=folder.id).pack()
+        )])
+
+    # Каналы без папок
+    if has_no_folder_channels:
+        kb.append([InlineKeyboardButton(
+            text="📺 Каналы без папок",
+            callback_data=ContentPlanCD(action="no_folder").pack()
+        )])
+
+    # Все каналы
+    kb.append([InlineKeyboardButton(
+        text="📋 Все",
+        callback_data=ContentPlanCD(action="all").pack()
+    )])
+
+    kb.append([InlineKeyboardButton(
+        text="⬅️ Назад",
+        callback_data=ContentPlanCD(action="back").pack()
+    )])
+
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def build_content_plan_channels_kb(channels: list, folder_id: int = 0) -> InlineKeyboardMarkup:
+    """
+    Список каналов для выбора.
+    """
+    kb = []
+
+    for ch in channels:
+        kb.append([InlineKeyboardButton(
+            text=f"📺 {ch.title}",
+            callback_data=ContentPlanCD(action="channel", channel_id=ch.id).pack()
+        )])
+
+    # Все каналы из этой папки
+    kb.append([InlineKeyboardButton(
+        text="📋 Все",
+        callback_data=ContentPlanCD(action="all", folder_id=folder_id).pack()
+    )])
+
+    kb.append([InlineKeyboardButton(
+        text="⬅️ Назад",
+        callback_data=ContentPlanCD(action="main").pack()
+    )])
+
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def build_content_plan_day_kb(
+        targets: list,
+        current_date: date,
+        utc_offset: int = 3,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура для просмотра постов на день.
+    - Кнопки времени постов
+    - Пагинация по дням
+    - Кнопка календаря
+    """
+    kb = []
+
+    # Кнопки времени постов (в ряд по 3)
+    time_buttons = []
+    for t in targets:
+        post_time = t.publish_at or t.sent_at
+        if post_time:
+            # Конвертируем UTC в локальное время
+            local_time = post_time + timedelta(hours=utc_offset)
+            time_str = local_time.strftime("%H:%M")
+
+            # Иконка статуса
+            if t.state.value == "sent":
+                icon = "✅"
+            elif t.state.value == "scheduled":
+                icon = "⏰"
+            else:
+                icon = "📝"
+
+            time_buttons.append(InlineKeyboardButton(
+                text=f"{icon} {time_str}",
+                callback_data=ContentPlanPostCD(action="view", target_id=t.id).pack()
+            ))
+
+    # Группируем по 3 в ряд
+    for i in range(0, len(time_buttons), 3):
+        kb.append(time_buttons[i:i + 3])
+
+    # Пагинация по дням
+    prev_date = current_date - timedelta(days=1)
+    next_date = current_date + timedelta(days=1)
+
+    kb.append([
+        InlineKeyboardButton(
+            text=f"← {format_date_short(prev_date)}",
+            callback_data=ContentPlanDayCD(
+                action="view",
+                year=prev_date.year,
+                month=prev_date.month,
+                day=prev_date.day
+            ).pack()
+        ),
+        InlineKeyboardButton(
+            text=format_date_short(current_date),
+            callback_data=ContentPlanDayCD(
+                action="view",
+                year=current_date.year,
+                month=current_date.month,
+                day=current_date.day
+            ).pack()
+        ),
+        InlineKeyboardButton(
+            text=f"{format_date_short(next_date)} →",
+            callback_data=ContentPlanDayCD(
+                action="view",
+                year=next_date.year,
+                month=next_date.month,
+                day=next_date.day
+            ).pack()
+        ),
+    ])
+
+    # Кнопка календаря
+    kb.append([InlineKeyboardButton(
+        text="📅 Развернуть календарь",
+        callback_data=ContentPlanCalendarCD(
+            action="back",
+            year=current_date.year,
+            month=current_date.month,
+            day=current_date.day
+        ).pack()
+    )])
+
+    # Назад
+    kb.append([InlineKeyboardButton(
+        text="⬅️ Назад",
+        callback_data=ContentPlanCD(action="main").pack()
+    )])
+
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def build_content_plan_calendar_kb(
+        targets: list,
+        year: int,
+        month: int,
+        days_with_posts: dict[int, int],
+        utc_offset: int = 3,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура календаря.
+    - Кнопки времени постов (для текущего выбранного дня)
+    - Пагинация по месяцам
+    - Календарь с отметками
+    """
+    kb = []
+
+    # Кнопки времени постов (в ряд по 3)
+    time_buttons = []
+    for t in targets:
+        post_time = t.publish_at or t.sent_at
+        if post_time:
+            local_time = post_time + timedelta(hours=utc_offset)
+            time_str = local_time.strftime("%H:%M")
+
+            if t.state.value == "sent":
+                icon = "✅"
+            elif t.state.value == "scheduled":
+                icon = "⏰"
+            else:
+                icon = "📝"
+
+            time_buttons.append(InlineKeyboardButton(
+                text=f"{icon} {time_str}",
+                callback_data=ContentPlanPostCD(action="view", target_id=t.id).pack()
+            ))
+
+    for i in range(0, len(time_buttons), 3):
+        kb.append(time_buttons[i:i + 3])
+
+    # Пагинация по месяцам
+    if month == 1:
+        prev_month, prev_year = 12, year - 1
+    else:
+        prev_month, prev_year = month - 1, year
+
+    if month == 12:
+        next_month, next_year = 1, year + 1
+    else:
+        next_month, next_year = month + 1, year
+
+    kb.append([
+        InlineKeyboardButton(
+            text=f"← {MONTH_NAMES[prev_month]}",
+            callback_data=ContentPlanCalendarCD(
+                action="prev_month",
+                year=prev_year,
+                month=prev_month
+            ).pack()
+        ),
+        InlineKeyboardButton(
+            text=MONTH_NAMES[month],
+            callback_data=ContentPlanCalendarCD(
+                action="back",
+                year=year,
+                month=month
+            ).pack()
+        ),
+        InlineKeyboardButton(
+            text=f"{MONTH_NAMES[next_month]} →",
+            callback_data=ContentPlanCalendarCD(
+                action="next_month",
+                year=next_year,
+                month=next_month
+            ).pack()
+        ),
+    ])
+
+    # Заголовок дней недели
+    kb.append([
+        InlineKeyboardButton(text=day, callback_data="ignore")
+        for day in WEEKDAY_NAMES
+    ])
+
+    # Календарь
+    cal = calendar.Calendar(firstweekday=0)
+    month_days = cal.monthdayscalendar(year, month)
+
+    for week in month_days:
+        row = []
+        for day in week:
+            if day == 0:
+                row.append(InlineKeyboardButton(text=" ", callback_data="ignore"))
+            else:
+                # Проверяем есть ли посты в этот день
+                has_posts = day in days_with_posts
+
+                if has_posts:
+                    text = f"◆{day}"  # Ромбик для дней с постами
+                else:
+                    text = str(day)
+
+                row.append(InlineKeyboardButton(
+                    text=text,
+                    callback_data=ContentPlanCalendarCD(
+                        action="select_day",
+                        year=year,
+                        month=month,
+                        day=day
+                    ).pack()
+                ))
+        kb.append(row)
+
+    # Все отложенные посты
+    kb.append([InlineKeyboardButton(
+        text="📋 Все отложенные посты",
+        callback_data=ContentPlanCalendarCD(action="all_posts", year=year, month=month).pack()
+    )])
+
+    # Назад
+    kb.append([InlineKeyboardButton(
+        text="⬅️ Назад",
+        callback_data=ContentPlanCD(action="main").pack()
+    )])
+
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def build_all_scheduled_posts_kb(dates_with_count: list[tuple[date, int]]) -> InlineKeyboardMarkup:
+    """
+    Клавиатура со всеми датами, где есть запланированные посты.
+    """
+    kb = []
+
+    # Группируем по 2 в ряд
+    buttons = []
+    for dt, count in dates_with_count:
+        posts_word = "пост" if count == 1 else ("поста" if 2 <= count <= 4 else "постов")
+        text = f"{format_date_medium(dt)}, {count} {posts_word}"
+        buttons.append(InlineKeyboardButton(
+            text=text,
+            callback_data=ContentPlanDayCD(
+                action="view",
+                year=dt.year,
+                month=dt.month,
+                day=dt.day
+            ).pack()
+        ))
+
+    for i in range(0, len(buttons), 2):
+        kb.append(buttons[i:i + 2])
+
+    # Назад
+    kb.append([InlineKeyboardButton(
+        text="⬅️ Назад",
+        callback_data=ContentPlanCalendarCD(
+            action="back",
+            year=datetime.now().year,
+            month=datetime.now().month
+        ).pack()
+    )])
+
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+def build_post_view_kb(target_id: int) -> InlineKeyboardMarkup:
+    """
+    Клавиатура просмотра поста.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="📋 Дублировать",
+                callback_data=ContentPlanPostCD(action="duplicate", target_id=target_id).pack()
+            ),
+            InlineKeyboardButton(
+                text="✏️ Изменить",
+                callback_data=ContentPlanPostCD(action="edit", target_id=target_id).pack()
+            ),
+        ],
+        [InlineKeyboardButton(
+            text="🗑 Удалить",
+            callback_data=ContentPlanPostCD(action="delete", target_id=target_id).pack()
+        )],
+        [InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=ContentPlanPostCD(action="back", target_id=target_id).pack()
+        )],
+    ])
+
+
+def build_delete_confirm_kb(target_id: int) -> InlineKeyboardMarkup:
+    """Подтверждение удаления."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Да, удалить",
+                callback_data=ContentPlanPostCD(action="delete_confirm", target_id=target_id).pack()
+            ),
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data=ContentPlanPostCD(action="view", target_id=target_id).pack()
+            ),
+        ],
+    ])
+
+def build_no_posts_kb() -> InlineKeyboardMarkup:
+    """Клавиатура когда нет постов."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=ContentPlanCD(action="main").pack()
+        )],
+    ])
+

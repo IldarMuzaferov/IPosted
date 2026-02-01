@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Sequence, Iterable
 
-from sqlalchemy import and_, delete, exists, func, select, update
+from sqlalchemy import and_, delete, exists, func, select, update, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, joinedload
 
@@ -1723,4 +1723,158 @@ async def orm_delete_reply_target(session: AsyncSession, *, target_id: int) -> N
     await session.execute(
         delete(ReplyTarget).where(ReplyTarget.target_id == target_id)
     )
+    await session.flush()
+
+async def orm_get_channel(session: AsyncSession, *, channel_id: int):
+    """Получает канал по ID."""
+    return await session.get(Channel, channel_id)
+
+
+async def orm_get_channels_targets_for_date(
+        session: AsyncSession,
+        *,
+        channel_ids: list[int],
+        target_date: date,
+) -> list:
+    """Получает все targets для нескольких каналов на конкретную дату."""
+    if not channel_ids:
+        return []
+
+    start_of_day = datetime.combine(target_date, datetime.min.time())
+    end_of_day = datetime.combine(target_date, datetime.max.time())
+
+    q = (
+        select(PostTarget)
+        .where(PostTarget.channel_id.in_(channel_ids))
+        .where(
+            or_(
+                and_(
+                    PostTarget.state.in_([TargetState.scheduled, TargetState.queued]),
+                    PostTarget.publish_at >= start_of_day,
+                    PostTarget.publish_at <= end_of_day,
+                ),
+                and_(
+                    PostTarget.state == TargetState.sent,
+                    PostTarget.sent_at >= start_of_day,
+                    PostTarget.sent_at <= end_of_day,
+                ),
+            )
+        )
+        .options(
+            joinedload(PostTarget.post).selectinload(Post.media),
+            joinedload(PostTarget.channel),
+        )
+        .order_by(
+            func.coalesce(PostTarget.publish_at, PostTarget.sent_at).asc()
+        )
+    )
+
+    res = await session.execute(q)
+    return list(res.scalars().unique().all())
+
+
+async def orm_get_dates_with_posts(
+        session: AsyncSession,
+        *,
+        channel_ids: list[int],
+        year: int,
+        month: int,
+) -> dict[int, int]:
+    """Возвращает словарь {день: количество_постов} для календаря."""
+    if not channel_ids:
+        return {}
+
+    start_date = datetime(year, month, 1)
+    if month == 12:
+        end_date = datetime(year + 1, 1, 1)
+    else:
+        end_date = datetime(year, month + 1, 1)
+
+    q_scheduled = (
+        select(
+            func.extract('day', PostTarget.publish_at).label('day'),
+            func.count(PostTarget.id).label('cnt')
+        )
+        .where(PostTarget.channel_id.in_(channel_ids))
+        .where(PostTarget.state.in_([TargetState.scheduled, TargetState.queued]))
+        .where(PostTarget.publish_at >= start_date)
+        .where(PostTarget.publish_at < end_date)
+        .group_by(func.extract('day', PostTarget.publish_at))
+    )
+
+    q_sent = (
+        select(
+            func.extract('day', PostTarget.sent_at).label('day'),
+            func.count(PostTarget.id).label('cnt')
+        )
+        .where(PostTarget.channel_id.in_(channel_ids))
+        .where(PostTarget.state == TargetState.sent)
+        .where(PostTarget.sent_at >= start_date)
+        .where(PostTarget.sent_at < end_date)
+        .group_by(func.extract('day', PostTarget.sent_at))
+    )
+
+    result = {}
+
+    res_scheduled = await session.execute(q_scheduled)
+    for row in res_scheduled:
+        day = int(row.day)
+        result[day] = result.get(day, 0) + row.cnt
+
+    res_sent = await session.execute(q_sent)
+    for row in res_sent:
+        day = int(row.day)
+        result[day] = result.get(day, 0) + row.cnt
+
+    return result
+
+
+async def orm_get_scheduled_dates_with_count(
+        session: AsyncSession,
+        *,
+        channel_ids: list[int],
+) -> list[tuple[date, int]]:
+    """Возвращает список (дата, количество_постов) для всех дат с запланированными постами."""
+    if not channel_ids:
+        return []
+
+    q = (
+        select(
+            func.date(PostTarget.publish_at).label('dt'),
+            func.count(PostTarget.id).label('cnt')
+        )
+        .where(PostTarget.channel_id.in_(channel_ids))
+        .where(PostTarget.state.in_([TargetState.scheduled, TargetState.queued]))
+        .where(PostTarget.publish_at.is_not(None))
+        .group_by(func.date(PostTarget.publish_at))
+        .order_by(func.date(PostTarget.publish_at).asc())
+    )
+
+    res = await session.execute(q)
+    return [(row.dt, row.cnt) for row in res]
+
+
+async def orm_delete_target(
+        session: AsyncSession,
+        *,
+        target_id: int,
+) -> None:
+    """Удаляет target."""
+    t = await session.get(PostTarget, target_id)
+    if not t:
+        return
+
+    post_id = t.post_id
+    await session.delete(t)
+    await session.flush()
+
+    # Проверяем, остались ли другие targets у поста
+    q = select(func.count(PostTarget.id)).where(PostTarget.post_id == post_id)
+    count = await session.scalar(q)
+
+    if count == 0:
+        post = await session.get(Post, post_id)
+        if post:
+            await session.delete(post)
+
     await session.flush()

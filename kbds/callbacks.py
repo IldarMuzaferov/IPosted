@@ -5,7 +5,8 @@ from typing import Literal
 
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.state import StatesGroup, State
-
+from datetime import datetime, date, timedelta
+import calendar
 
 class CreatePostStates(StatesGroup):
     choosing_channels = State()
@@ -125,3 +126,83 @@ TIMEZONES = [
     ("America/Anchorage", "Аляска", "GMT-9", -9),
     ("Pacific/Honolulu", "Гавайи", "GMT-10", -10),
 ]
+
+
+class ContentPlanStates(StatesGroup):
+    viewing_day = State()                    # Просмотр дня
+    viewing_calendar = State()               # Просмотр календаря
+    viewing_post = State()                   # Просмотр поста
+    duplicate_choosing_channel = State()     # Выбор канала для дублирования
+
+class ContentPlanCD(CallbackData, prefix="cplan"):
+    """Основная навигация контент-плана."""
+    action: str  # main | folder | channels | channel | all | no_folder | back
+    folder_id: int = 0
+    channel_id: int = 0
+
+
+class ContentPlanDayCD(CallbackData, prefix="cpday"):
+    """Навигация по дням."""
+    action: str  # view | prev | next | calendar | back
+    year: int = 0
+    month: int = 0
+    day: int = 0
+
+
+class ContentPlanCalendarCD(CallbackData, prefix="cpcal"):
+    """Календарь."""
+    action: str  # select_day | prev_month | next_month | all_posts | back
+    year: int = 0
+    month: int = 0
+    day: int = 0
+
+
+class ContentPlanPostCD(CallbackData, prefix="cppost"):
+    """Действия с постом."""
+    action: str  # view | duplicate | edit | delete | back
+    target_id: int = 0
+
+MONTH_NAMES = {
+    1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
+    5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
+    9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
+}
+
+MONTH_NAMES_GENITIVE = {
+    1: "января", 2: "февраля", 3: "марта", 4: "апреля",
+    5: "мая", 6: "июня", 7: "июля", 8: "августа",
+    9: "сентября", 10: "октября", 11: "ноября", 12: "декабря"
+}
+
+MONTH_NAMES_SHORT = {
+    1: "янв", 2: "фев", 3: "мар", 4: "апр",
+    5: "май", 6: "июн", 7: "июл", 8: "авг",
+    9: "сен", 10: "окт", 11: "ноя", 12: "дек"
+}
+
+WEEKDAY_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+WEEKDAY_NAMES_FULL = {
+    0: "понедельник", 1: "вторник", 2: "среда", 3: "четверг",
+    4: "пятницу", 5: "субботу", 6: "воскресенье"
+}
+
+def format_date_full(d: date) -> str:
+    """Форматирует дату: 'вторник, 13 января 2026 г.'"""
+    weekday = WEEKDAY_NAMES_FULL[d.weekday()]
+    month = MONTH_NAMES_GENITIVE[d.month]
+    return f"{weekday}, {d.day} {month} {d.year} г."
+
+
+def format_date_short(d: date) -> str:
+    """Форматирует дату: 'Вт, 13 янв'"""
+    weekday = WEEKDAY_NAMES[d.weekday()]
+    month = MONTH_NAMES_SHORT[d.month]
+    return f"{weekday}, {d.day} {month}"
+
+
+def format_date_medium(d: date) -> str:
+    """Форматирует дату: 'Пн 13 Янв'"""
+    weekday = WEEKDAY_NAMES[d.weekday()]
+    month = MONTH_NAMES_SHORT[d.month].capitalize()
+    return f"{weekday} {d.day} {month}"

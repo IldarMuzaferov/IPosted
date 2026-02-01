@@ -426,33 +426,41 @@ def _chat_url(chat) -> str:
 
 
 #Проверка прав бота и пользователя
-async def _check_bot_rights(bot: Bot, channel_id: int) -> Tuple[bool, str]:
+async def _check_bot_rights(bot: Bot, channel_id: int) -> Tuple[bool, str, list[str]]:
     """
-    Проверяем, что бот админ и есть нужные права.
+    Проверяем права бота. Возвращает (ok, error, warnings).
     """
     me = await bot.get_me()
     try:
         member = await bot.get_chat_member(channel_id, me.id)
     except TelegramBadRequest:
-        return False, "Не удалось получить статус бота в канале. Проверьте, что бот добавлен в канал."
+        return False, "Не удалось получить статус бота в канале.", []
 
     status = getattr(member, "status", None)
     if status not in ("administrator", "creator"):
-        return False, "Бот не является администратором канала."
+        return False, "Бот не является администратором канала.", []
 
-    # У creator атрибутов прав может не быть — считаем ок
     if status == "creator":
-        return True, ""
+        return True, "", []
 
-    # administrator: проверяем нужные флаги
+    # Проверяем права
     can_post = getattr(member, "can_post_messages", False)
     can_delete = getattr(member, "can_delete_messages", False)
     can_edit = getattr(member, "can_edit_messages", False)
     can_pin = getattr(member, "can_pin_messages", False)
-    if not (can_post and can_delete and can_edit and can_pin):
-        return False, "Боту не выданы все права: отправка, удаление, редактирование."
 
-    return True, ""
+    if not can_post:
+        return False, "Боту не выдано право на отправку сообщений.", []
+
+    warnings = []
+    if not can_delete:
+        warnings.append("❌ Удаление сообщений - недоступно")
+    if not can_edit:
+        warnings.append("❌ Редактирование сообщений - недоступно")
+    if not can_pin:
+        warnings.append("❌ Закрепление сообщений - недоступно")
+
+    return True, "", warnings
 
 
 async def _check_user_is_admin(bot: Bot, channel_id: int, user_id: int) -> Tuple[bool, str]:
@@ -494,20 +502,23 @@ async def connect_channel_message(message: types.Message, state: FSMContext, ses
             return
 
     # 2) проверки
-    ok, err = await _check_bot_rights(bot, channel_id)
+    ok, err, warnings = await _check_bot_rights(bot, channel_id)
     if not ok:
         await message.answer(
             "Канал не подключен.\n\n"
             f"Причина: {err}\n\n"
             "Сделайте бота администратором и выдайте права:\n"
-            "✅ Отправка сообщений\n✅ Удаление сообщений\n✅ Редактирование сообщений"
+            "✅ Отправка сообщений\n"
+            "✅ Удаление сообщений\n"
+            "✅ Редактирование сообщений\n"
+            "✅ Закрепление сообщений"
         )
         return
 
-    ok, err = await _check_user_is_admin(bot, channel_id, message.from_user.id)
-    if not ok:
-        await message.answer(f"Канал не подключен.\n\nПричина: {err}")
-        return
+    # Продолжаем с возможными предупреждениями
+    warning_text = ""
+    if warnings:
+        warning_text = "\n\n⚠️ Некоторые функции могут быть недоступны:\n" + "\n".join(warnings)
 
     # 3) сохранить в БД (канал + связка админ)
     ch_username = getattr(chat, "username", None)
@@ -1809,6 +1820,7 @@ async def publish_confirm_yes(call: types.CallbackQuery, callback_data: PublishC
         )
     await call.message.answer(text, reply_markup=ik_finish_nav())
     await state.set_state(CreatePostStates.composing)
+    await state.clear()
     await call.answer()
 
 @user_private_router.callback_query(PublishCD.filter(F.action == "now"))

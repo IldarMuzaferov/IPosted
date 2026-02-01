@@ -113,8 +113,12 @@ async def settings_add_channel(call: types.CallbackQuery, state: FSMContext):
 
 @settings_router.message(StateFilter(SettingsStates.waiting_channel_from_settings), F.forward_from_chat)
 async def settings_receive_channel(message: types.Message, state: FSMContext, session: AsyncSession):
-    """Получение пересланного сообщения из канала."""
+    """Получение пересланного сообщения из канала - ИСПРАВЛЕННАЯ ВЕРСИЯ."""
     chat = message.forward_from_chat
+
+    if not chat:
+        await message.answer("❌ Перешлите сообщение из канала.")
+        return
 
     if chat.type != "channel":
         await message.answer("❌ Это не канал. Перешлите сообщение из канала.")
@@ -129,13 +133,54 @@ async def settings_receive_channel(message: types.Message, state: FSMContext, se
                 "Добавьте бота в администраторы канала и попробуйте снова."
             )
             return
-    except Exception:
-        await message.answer("❌ Не удалось проверить права бота в канале.")
+
+        # Проверяем обязательные права (только для administrator, не creator)
+        if bot_member.status == "administrator":
+            can_post = getattr(bot_member, "can_post_messages", False)
+            can_delete = getattr(bot_member, "can_delete_messages", False)
+            can_edit = getattr(bot_member, "can_edit_messages", False)
+
+            if not can_post:
+                await message.answer(
+                    "❌ Боту не выдано право на отправку сообщений.\n\n"
+                    "Выдайте боту все необходимые права:\n"
+                    "✅ Отправка сообщений\n"
+                    "✅ Удаление сообщений\n"
+                    "✅ Редактирование сообщений"
+                )
+                return
+
+            if not can_delete or not can_edit:
+                missing = []
+                if not can_delete:
+                    missing.append("удаление сообщений")
+                if not can_edit:
+                    missing.append("редактирование сообщений")
+                await message.answer(
+                    f"❌ Боту не выданы права: {', '.join(missing)}.\n\n"
+                    "Выдайте боту все необходимые права и попробуйте снова."
+                )
+                return
+
+    except Exception as e:
+        await message.answer(f"❌ Не удалось проверить права бота в канале: {e}")
         return
+
+    # Проверяем что пользователь - админ канала
+    try:
+        user_member = await message.bot.get_chat_member(chat.id, message.from_user.id)
+        if user_member.status not in ("administrator", "creator"):
+            await message.answer("❌ Вы не являетесь администратором этого канала.")
+            return
+    except Exception:
+        await message.answer("❌ Не удалось проверить ваши права в канале.")
+        return
+
+    # Определяем приватность канала
     is_private = chat.username is None
 
     # Сохраняем канал
-    channel = await orm_upsert_channel(
+    await orm_upsert_channel(
         session,
         channel_id=chat.id,
         title=chat.title,
@@ -155,6 +200,12 @@ async def settings_receive_channel(message: types.Message, state: FSMContext, se
 
     user = await orm_get_user(session, user_id=message.from_user.id)
     user_tz = user.timezone if user else "Europe/Moscow"
+
+    SETTINGS_MAIN_TEXT = (
+        "⚙️ <b>НАСТРОЙКИ</b>\n\n"
+        "В этом разделе вы можете настроить работу с ботом, "
+        "с отдельным каналом, а также добавить новый канал в Posted."
+    )
 
     await message.answer(
         f"✅ Канал <b>{chat.title}</b> успешно подключен!\n\n" + SETTINGS_MAIN_TEXT,
