@@ -79,6 +79,9 @@ class Channel(Base):
     bot_admin_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=False), nullable=True
     )
+    linked_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    delete_comments: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), nullable=False, server_default=func.now()
@@ -234,6 +237,10 @@ class Post(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+    reaction_buttons: Mapped[list["PostReactionButton"]] = relationship(
+        back_populates="post", cascade="all, delete-orphan",
+        order_by="[PostReactionButton.row, PostReactionButton.position]"
     )
 
     # Relationships
@@ -547,3 +554,54 @@ class PostEvent(Base):
         Index("ix_post_events_post_time", "post_id", "created_at"),
         Index("ix_post_events_target", "target_id"),
     )
+
+
+class PostReactionButton(Base):
+    """
+    Кнопка-реакция под постом.
+    Пользователь задаёт эмодзи, бот создаёт инлайн-кнопки.
+    """
+    __tablename__ = "post_reaction_buttons"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    post_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("posts.id", ondelete="CASCADE"), nullable=False
+    )
+
+    emoji: Mapped[str] = mapped_column(String(16), nullable=False)  # 👍, 👎, 🔥 и т.д.
+
+    row: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
+    position: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
+
+    # Счётчик кликов (денормализация для быстрого отображения)
+    click_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # Relationships
+    post: Mapped["Post"] = relationship(back_populates="reaction_buttons")
+    clicks: Mapped[list["ReactionClick"]] = relationship(
+        back_populates="button", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("ix_post_reaction_buttons_post", "post_id"),
+    )
+
+
+class ReactionClick(Base):
+    """
+    Клик пользователя на кнопку-реакцию.
+    Один пользователь может кликнуть только один раз на одну кнопку.
+    """
+    __tablename__ = "reaction_clicks"
+
+    button_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("post_reaction_buttons.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    clicked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), nullable=False, server_default=func.now()
+    )
+
+    # Relationships
+    button: Mapped["PostReactionButton"] = relationship(back_populates="clicks")

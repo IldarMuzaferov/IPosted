@@ -1,16 +1,15 @@
 import asyncio
 import re
 from typing import Optional, Tuple
-
-from datetime import datetime, timedelta, timezone
+from datetime import timezone
 from aiogram import F, types, Router, Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart, StateFilter
-from aiogram.filters.callback_data import CallbackData
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from aiogram.types import Message, CallbackQuery, ContentType, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.fsm.state import StatesGroup, State
+from aiogram.types import Message, ContentType, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
+from sqlalchemy.orm import selectinload
 
 from database.models import TgMemberStatus, PostEventType
 from database.orm_query import orm_get_user_channels, orm_get_free_channels_for_user, orm_get_folder_channels, \
@@ -18,42 +17,31 @@ from database.orm_query import orm_get_user_channels, orm_get_free_channels_for_
     orm_edit_post_text, orm_add_media_to_post, orm_get_post_full, orm_set_target_autodelete, orm_publish_target_now, \
     orm_log_post_event, orm_schedule_target, orm_set_post_flags, orm_set_reply_target_forwarded, orm_get_user
 from filters.chat_types import ChatTypeFilter
+from handlers.comments_blocker import show_comments_warning_if_needed
 from kbds.callbacks import CreatePostCD, CreatePostStates, ConnectChannelStates, EditTextStates, AttachMediaStates, \
-    UrlButtonsStates, PublishStates, PublishCD
-from kbds.inline import get_callback_btns, get_url_btns, get_inlineMix_btns, ik_channels_picker, ik_create_post_menu, \
-    ik_create_root_menu, ik_channels_menu, ik_folders_menu, ik_after_channel_connected, ik_folders_empty, \
+    UrlButtonsStates, PublishStates, PublishCD, ReactionCD, ReactionStates
+from kbds.inline import ik_create_post_menu, ik_create_root_menu, ik_channels_menu, ik_after_channel_connected, ik_folders_empty, \
     ik_folder_channels, ik_folders_list, ik_edit_text_controls, ik_attach_media_controls, ik_send_mode, ik_delete_after, \
     ik_confirm_publish, ik_finish_nav, build_settings_main_kb
-from datetime import datetime
-# from main import bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-import datetime as dt
-from create_bot import bot
 from datetime import datetime as dt_utc
-from kbds.post_editor import CopyPostCD, build_copy_channels_kb, UrlButtonsCD, EditorContext, editor_ctx_from_dict, \
-    editor_ctx_to_dict
+from kbds.post_editor import build_copy_channels_kb, EditorContext, editor_ctx_to_dict
 from database.orm_query import orm_get_all_user_channels, orm_copy_post_to_channels
 from kbds.post_editor import HiddenPartCD, build_hidden_part_input_kb, build_hidden_part_skip_kb, build_hidden_part_settings_kb
 from kbds.callbacks import HiddenPartStates
 from database.orm_query import orm_get_hidden_part, orm_save_hidden_part, orm_delete_hidden_part, orm_set_post_text_position
-from kbds.post_editor import ReplyPostCD, build_reply_post_setup_kb, build_reply_post_settings_kb, build_reply_post_input_kb
+from kbds.post_editor import ReplyPostCD, build_reply_post_settings_kb, build_reply_post_input_kb
 from kbds.callbacks import ReplyPostStates
-from database.orm_query import orm_save_reply_target, orm_delete_reply_target
-
-
 from datetime import datetime, timedelta
-import logging
-
 from kbds.media_group_buffer import MEDIA_GROUP_BUFFER, _finalize_album
 from kbds.post_editor import editor_state_to_dict, build_editor_kb, EditorState, TOGGLE_KEYS, editor_state_from_dict, \
     EditorCD, EditTextCD, make_ctx_from_message, CopyPostCD
-
 from kbds.post_editor import UrlButtonsCD, build_url_buttons_prompt_kb, merge_url_and_editor_kb
 from database.orm_query import orm_save_post_buttons, orm_delete_post_buttons, orm_get_post_buttons
+from database.models import PostReactionButton, ReactionClick, Post
 
 user_private_router = Router()
 user_private_router.message.filter(ChatTypeFilter(["private"]))
-
 
 START_TEXT = (
     "✅ Posted - это простой и удобный бот для отложенного постинга, поддерживающий работу с ⭐️ анимированными эмодзи.\n\n"
@@ -107,7 +95,6 @@ async def cmd_start(message: types.Message, session: AsyncSession, state: FSMCon
     await message.answer(START_TEXT, reply_markup=main_reply_kb())
 
 def main_reply_kb() -> ReplyKeyboardMarkup:
-    # 4 постоянные реплай-кнопки по ТЗ :contentReference[oaicite:2]{index=2}
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Создать пост"), KeyboardButton(text="Настройки")],
@@ -693,15 +680,25 @@ async def editor_toggle(call: types.CallbackQuery, callback_data: EditorCD, stat
 
     # Специальные сообщения для некоторых кнопок
     if key == "comments":
-        if new_value:
+        if not new_value:  # new_value уже вычислено выше!
             await call.answer(
-                "Комментарии включены.\n\n"
-                "⚠️ Убедитесь, что у канала есть группа обсуждения "
-                "и бот добавлен в неё.",
+                "⚠️ Для блокировки комментариев дайте боту "
+                "право на удаление сообщений в чате обсуждения канала.",
                 show_alert=True
             )
         else:
-            await call.answer("Комментарии отключены")
+            await call.answer("💬 Комментарии включены")
+
+
+        # ДОБАВИТЬ ЭТО:
+        if not st.comments:
+            await call.answer(
+                "⚠️ Для блокировки комментариев дайте боту "
+                "право на удаление сообщений в чате обсуждения канала.",
+                show_alert=True
+            )
+        else:
+            await call.answer("💬 Комментарии включены")
     elif key == "content_protect":
         await call.answer("Защита контента " + ("включена" if new_value else "отключена"))
     elif key == "pin":
@@ -1223,7 +1220,6 @@ async def copy_select_channel(call: types.CallbackQuery, callback_data: CopyPost
     else:
         selected_ids.add(channel_id)
 
-    # Сохраняем как list (FSM лучше работает с list)
     await state.update_data(copy_selected_ids=list(selected_ids))
 
     # Получаем список доступных каналов
@@ -2739,3 +2735,339 @@ async def settings_reply_button(message: types.Message, state: FSMContext, sessi
         parse_mode="HTML",
         reply_markup=build_settings_main_kb(user_tz),
     )
+
+
+REACTIONS_PROMPT = """
+❤️ <b>КНОПКИ РЕАКЦИИ</b>
+
+Отправьте боту список реакций, разделяя их символом «/», в следующем формате:
+<code>👍/👎/🤯</code>
+
+Чтобы разместить реакции в несколько строчек, разделите их переносом строки:
+<code>👍/👎
+🔥/💀</code>
+
+Или отправьте <b>clear</b> чтобы убрать все реакции.
+"""
+
+
+def parse_reaction_emojis(text: str) -> list[list[str]]:
+    """
+    Парсит ввод пользователя в структуру [[row1_emojis], [row2_emojis], ...]
+
+    Примеры:
+    "👍/👎/🤯" -> [["👍", "👎", "🤯"]]
+    "👍/👎\n🔥/💀" -> [["👍", "👎"], ["🔥", "💀"]]
+    """
+    rows = []
+    lines = text.strip().split('\n')
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        # Разделяем по /
+        emojis = [e.strip() for e in line.split('/') if e.strip()]
+        if emojis:
+            rows.append(emojis)
+
+    return rows
+
+
+def validate_emojis(rows: list[list[str]]) -> tuple[bool, str]:
+    """
+    Валидация эмодзи.
+    Возвращает (is_valid, error_message)
+    """
+    if not rows:
+        return False, "Не найдено ни одной реакции"
+
+    total_emojis = sum(len(row) for row in rows)
+    if total_emojis > 24:  # Ограничение на количество
+        return False, "Максимум 24 реакции"
+
+    if len(rows) > 6:  # Максимум 6 рядов
+        return False, "Максимум 6 рядов реакций"
+
+    for row in rows:
+        if len(row) > 8:  # Максимум 8 кнопок в ряду
+            return False, "Максимум 8 реакций в одном ряду"
+
+    return True, ""
+
+
+def build_reaction_keyboard(
+        reaction_buttons: list,  # list[PostReactionButton]
+        user_clicks: set[int] | None = None,  # set of button_ids user clicked
+) -> types.InlineKeyboardMarkup:
+    """
+    Строит клавиатуру из кнопок-реакций.
+
+    Формат кнопки: "👍 42" или "✅👍 42" если пользователь кликнул
+    """
+    if not reaction_buttons:
+        return None
+
+    user_clicks = user_clicks or set()
+
+    # Группируем по рядам
+    rows_map: dict[int, list] = {}
+    for btn in reaction_buttons:
+        if btn.row not in rows_map:
+            rows_map[btn.row] = []
+        rows_map[btn.row].append(btn)
+
+    kb_rows = []
+    for row_idx in sorted(rows_map.keys()):
+        row_buttons = sorted(rows_map[row_idx], key=lambda b: b.position)
+        kb_row = []
+
+        for btn in row_buttons:
+            # Формируем текст кнопки
+            prefix = "✅" if btn.id in user_clicks else ""
+            count = btn.click_count if btn.click_count > 0 else ""
+            text = f"{prefix}{btn.emoji} {count}".strip()
+
+            kb_row.append(types.InlineKeyboardButton(
+                text=text,
+                callback_data=ReactionCD(button_id=btn.id).pack()
+            ))
+
+        if kb_row:
+            kb_rows.append(kb_row)
+
+    return types.InlineKeyboardMarkup(inline_keyboard=kb_rows) if kb_rows else None
+
+
+@user_private_router.callback_query(ReactionCD.filter())
+async def reaction_click(
+        call: types.CallbackQuery,
+        callback_data: ReactionCD,
+        session: AsyncSession
+):
+    """
+    Обработка клика на кнопку-реакцию.
+    - Если пользователь ещё не кликал - добавляем клик
+    - Если уже кликал - убираем клик (toggle)
+    """
+
+    button_id = callback_data.button_id
+    user_id = call.from_user.id
+
+    # Получаем кнопку с постом
+    btn = await session.get(PostReactionButton, button_id, options=[
+        selectinload(PostReactionButton.post).selectinload(Post.reaction_buttons)
+    ])
+
+    if not btn:
+        await call.answer("Кнопка не найдена", show_alert=True)
+        return
+
+    # Проверяем, кликал ли пользователь
+    existing_click = await session.execute(
+        select(ReactionClick).where(
+            ReactionClick.button_id == button_id,
+            ReactionClick.user_id == user_id
+        )
+    )
+    existing = existing_click.scalar_one_or_none()
+
+    if existing:
+        # Убираем клик (toggle off)
+        await session.delete(existing)
+        btn.click_count = max(0, btn.click_count - 1)
+        action = "removed"
+    else:
+        # Добавляем клик
+        new_click = ReactionClick(button_id=button_id, user_id=user_id)
+        session.add(new_click)
+        btn.click_count += 1
+        action = "added"
+
+    await session.commit()
+
+    # Получаем все клики пользователя для этого поста
+    user_clicks_q = await session.execute(
+        select(ReactionClick.button_id).where(
+            ReactionClick.user_id == user_id,
+            ReactionClick.button_id.in_([b.id for b in btn.post.reaction_buttons])
+        )
+    )
+    user_clicks = set(row[0] for row in user_clicks_q.all())
+
+    # Обновляем клавиатуру
+    # Перезагружаем кнопки для актуальных счётчиков
+    await session.refresh(btn.post, ["reaction_buttons"])
+
+    new_kb = build_reaction_keyboard(btn.post.reaction_buttons, user_clicks)
+
+    try:
+        await call.message.edit_reply_markup(reply_markup=new_kb)
+    except TelegramBadRequest:
+        pass
+
+    await call.answer()
+
+
+async def create_reaction_buttons(
+        session: AsyncSession,
+        post_id: int,
+        emoji_rows: list[list[str]]
+) -> list:
+    """
+    Создаёт кнопки-реакции для поста.
+    Удаляет старые, создаёт новые.
+    """
+
+    # Удаляем старые
+    await session.execute(
+        delete(PostReactionButton).where(PostReactionButton.post_id == post_id)
+    )
+
+    # Создаём новые
+    buttons = []
+    for row_idx, row_emojis in enumerate(emoji_rows):
+        for pos_idx, emoji in enumerate(row_emojis):
+            btn = PostReactionButton(
+                post_id=post_id,
+                emoji=emoji,
+                row=row_idx,
+                position=pos_idx,
+                click_count=0
+            )
+            session.add(btn)
+            buttons.append(btn)
+
+    await session.flush()
+    return buttons
+
+
+async def get_reaction_keyboard_for_post(
+        session: AsyncSession,
+        post_id: int,
+        user_id: int | None = None
+) -> types.InlineKeyboardMarkup | None:
+    """
+    Получает клавиатуру реакций для поста.
+    Если user_id указан - отмечает кнопки, на которые пользователь кликал.
+    """
+
+    # Получаем кнопки
+    result = await session.execute(
+        select(PostReactionButton)
+        .where(PostReactionButton.post_id == post_id)
+        .order_by(PostReactionButton.row, PostReactionButton.position)
+    )
+    buttons = result.scalars().all()
+
+    if not buttons:
+        return None
+
+    # Получаем клики пользователя
+    user_clicks = set()
+    if user_id:
+        clicks_result = await session.execute(
+            select(ReactionClick.button_id).where(
+                ReactionClick.user_id == user_id,
+                ReactionClick.button_id.in_([b.id for b in buttons])
+            )
+        )
+        user_clicks = set(row[0] for row in clicks_result.all())
+
+    return build_reaction_keyboard(buttons, user_clicks)
+
+
+@user_private_router.callback_query(EditorCD.filter(F.action == "reactions"))
+async def editor_reactions(call: types.CallbackQuery, callback_data: EditorCD, state: FSMContext):
+    await state.set_state(ReactionStates.entering_emojis)
+    await state.update_data(reaction_post_id=callback_data.post_id)
+    await call.message.answer(REACTIONS_PROMPT, parse_mode="HTML")
+    await call.answer()
+
+
+@user_private_router.message(StateFilter(ReactionStates.entering_emojis), F.text)
+async def editor_receive_reactions(message: types.Message, state: FSMContext, session: AsyncSession):
+    text = message.text.strip().lower()
+
+    if text == "clear":
+        # Удаляем все реакции
+        data = await state.get_data()
+        post_id = data.get("reaction_post_id")
+        if post_id:
+            await session.execute(
+                delete(PostReactionButton).where(PostReactionButton.post_id == post_id)
+            )
+            await session.commit()
+        await state.set_state(CreatePostStates.editing)
+        await message.answer("✅ Реакции удалены")
+        return
+
+    # Парсим эмодзи
+    rows = parse_reaction_emojis(message.text)
+    is_valid, error = validate_emojis(rows)
+
+    if not is_valid:
+        await message.answer(f"❌ {error}")
+        return
+
+    # Создаём кнопки
+    data = await state.get_data()
+    post_id = data.get("reaction_post_id")
+
+    if post_id:
+        await create_reaction_buttons(session, post_id, rows)
+        await session.commit()
+
+    # Возвращаемся в редактор
+    await state.set_state(CreatePostStates.editing)
+
+    # Показываем результат
+    total = sum(len(row) for row in rows)
+    await message.answer(f"✅ Добавлено {total} реакций в {len(rows)} ряд(ов)")
+
+
+@user_private_router.callback_query(EditorCD.filter((F.action == "toggle") & (F.key == "comments")))
+async def editor_toggle_comments(call, callback_data, state, session):
+    data = await state.get_data()
+    st = editor_state_from_dict(data.get("editor", {}))
+
+    # Переключаем
+    st.comments = not st.comments
+
+    # Если отключаем - показываем предупреждение
+    if not st.comments:
+        channel_ids = data.get("selected_channel_ids", [])
+        for ch_id in channel_ids:
+            await show_comments_warning_if_needed(
+                call.bot, session, ch_id, call.message.chat.id
+            )
+
+    await state.update_data(editor=editor_state_to_dict(st))
+
+
+async def update_all_channels_linked_chat(bot, session_maker):
+    """Обновляет linked_chat_id для всех каналов."""
+    from database.models import Channel
+    from sqlalchemy import select
+
+    async with session_maker() as session:
+        result = await session.execute(select(Channel))
+        channels = result.scalars().all()
+
+        for channel in channels:
+            try:
+                chat = await bot.get_chat(channel.id)
+                linked_chat_id = getattr(chat, 'linked_chat_id', None)
+
+                if linked_chat_id:
+                    channel.linked_chat_id = linked_chat_id
+                    print(f"✅ {channel.title}: linked_chat_id = {linked_chat_id}")
+                else:
+                    print(f"⚠️ {channel.title}: нет чата обсуждения")
+
+            except Exception as e:
+                print(f"❌ {channel.title}: {e}")
+
+        await session.commit()
+        print("Done!")

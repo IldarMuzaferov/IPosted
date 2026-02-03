@@ -3,7 +3,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from kbds.callbacks import CreatePostCD, PublishCD, NavCD, TIMEZONES, SettingsCD, TimezoneCD, FolderChannelsCD, \
     FolderEditCD, FoldersCD, ContentPlanCD, ContentPlanCalendarCD, ContentPlanDayCD, format_date_short, \
-    ContentPlanPostCD, MONTH_NAMES, WEEKDAY_NAMES, format_date_medium
+    ContentPlanPostCD, MONTH_NAMES, WEEKDAY_NAMES, format_date_medium, EditPostCD, EditTimerCD, EditPublishCD
 from kbds.post_editor import EditTextCD
 from datetime import datetime, timezone, timedelta, date
 from zoneinfo import ZoneInfo
@@ -874,6 +874,341 @@ def build_no_posts_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(
             text="⬅️ Назад",
             callback_data=ContentPlanCD(action="main").pack()
+        )],
+    ])
+
+
+TIMER_OPTIONS = [
+    (0, "Не нужно"),
+    (5, "5 минут"),
+    (10, "10 минут"),
+    (30, "30 минут"),
+    (60, "1 час"),
+    (180, "3 часа"),
+    (360, "6 часов"),
+    (720, "12 часов"),
+    (1440, "24 часа"),
+    (2880, "2 дня"),
+    (4320, "3 дня"),
+    (10080, "7 дней"),
+]
+
+
+def format_timer(minutes: int) -> str:
+    """Форматирует таймер для отображения."""
+    if minutes == 0:
+        return "Не нужно"
+    if minutes < 60:
+        return f"{minutes} мин"
+    if minutes < 1440:
+        hours = minutes // 60
+        return f"{hours} ч"
+    days = minutes // 1440
+    return f"{days} дн"
+
+
+def build_edit_post_cancel_kb() -> InlineKeyboardMarkup:
+    """Кнопка отмены при ожидании пересланного поста."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="❌ Отменить",
+            callback_data=EditPostCD(action="cancel").pack()
+        )],
+    ])
+
+
+def build_edit_post_editor_kb(
+        target_id: int,
+        timer_minutes: int = 0,
+        publish_now: bool = True,
+        publish_time: datetime | None = None,
+        # Стандартные настройки поста
+        bell: bool = True,
+        reactions: bool = False,
+        content_protect: bool = False,
+        pin: bool = False,
+        comments: bool = False,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура редактирования существующего поста.
+    Включает стандартные кнопки + Таймер удаления + Время публикации.
+    """
+    kb = []
+
+    # Ряд 1: Уведомление и реакции
+    kb.append([
+        InlineKeyboardButton(
+            text=f"{'🔔' if bell else '🔕'} Уведомление",
+            callback_data=f"editpost_toggle:bell:{target_id}"
+        ),
+        InlineKeyboardButton(
+            text=f"{'❤️' if reactions else '🤍'} Реакции",
+            callback_data=f"editpost_toggle:reactions:{target_id}"
+        ),
+    ])
+
+    # Ряд 2: Защита и закрепление
+    kb.append([
+        InlineKeyboardButton(
+            text=f"{'🔒' if content_protect else '🔓'} Защита",
+            callback_data=f"editpost_toggle:protect:{target_id}"
+        ),
+        InlineKeyboardButton(
+            text=f"{'📌' if pin else '📍'} Закрепить",
+            callback_data=f"editpost_toggle:pin:{target_id}"
+        ),
+    ])
+
+    # Ряд 3: Комментарии
+    kb.append([
+        InlineKeyboardButton(
+            text=f"{'💬' if comments else '🚫'} Комментарии",
+            callback_data=f"editpost_toggle:comments:{target_id}"
+        ),
+    ])
+
+    # Ряд 4: Таймер удаления
+    timer_text = f"⏱ Таймер удаления: {format_timer(timer_minutes)}"
+    kb.append([InlineKeyboardButton(
+        text=timer_text,
+        callback_data=EditPostCD(action="timer", target_id=target_id).pack()
+    )])
+
+    # Ряд 5: Время публикации
+    if publish_now:
+        publish_text = "🚀 Выложить сразу"
+    elif publish_time:
+        publish_text = f"📅 {publish_time.strftime('%d.%m.%Y %H:%M')}"
+    else:
+        publish_text = "📅 Выбрать время"
+
+    kb.append([InlineKeyboardButton(
+        text=publish_text,
+        callback_data=EditPostCD(action="publish_time", target_id=target_id).pack()
+    )])
+
+    # Ряд 6: Продолжить
+    kb.append([InlineKeyboardButton(
+        text="✅ Сохранить изменения",
+        callback_data=EditPostCD(action="continue", target_id=target_id).pack()
+    )])
+
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def build_timer_select_kb(current_minutes: int = 0) -> InlineKeyboardMarkup:
+    """Клавиатура выбора таймера удаления."""
+    kb = []
+
+    for minutes, label in TIMER_OPTIONS:
+        if minutes == current_minutes:
+            text = f"✅ {label}"
+        else:
+            text = label
+
+        kb.append([InlineKeyboardButton(
+            text=text,
+            callback_data=EditTimerCD(action="select", minutes=minutes).pack()
+        )])
+
+    kb.append([InlineKeyboardButton(
+        text="⬅️ Назад",
+        callback_data=EditTimerCD(action="back").pack()
+    )])
+
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def build_publish_time_kb() -> InlineKeyboardMarkup:
+    """Клавиатура выбора времени публикации."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🚀 Выложить сразу",
+            callback_data=EditPublishCD(action="now").pack()
+        )],
+        [InlineKeyboardButton(
+            text="📅 Запланировать",
+            callback_data=EditPublishCD(action="schedule").pack()
+        )],
+        [InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=EditPublishCD(action="back").pack()
+        )],
+    ])
+
+
+def build_date_picker_kb(year: int, month: int, selected_day: int = 0) -> InlineKeyboardMarkup:
+    """Клавиатура выбора даты."""
+    import calendar
+
+    MONTH_NAMES = {
+        1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
+        5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
+        9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
+    }
+
+    WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+    kb = []
+
+    # Навигация по месяцам
+    if month == 1:
+        prev_m, prev_y = 12, year - 1
+    else:
+        prev_m, prev_y = month - 1, year
+
+    if month == 12:
+        next_m, next_y = 1, year + 1
+    else:
+        next_m, next_y = month + 1, year
+
+    kb.append([
+        InlineKeyboardButton(
+            text="◀️",
+            callback_data=EditPublishCD(action="set_date", year=prev_y, month=prev_m).pack()
+        ),
+        InlineKeyboardButton(
+            text=f"{MONTH_NAMES[month]} {year}",
+            callback_data="ignore"
+        ),
+        InlineKeyboardButton(
+            text="▶️",
+            callback_data=EditPublishCD(action="set_date", year=next_y, month=next_m).pack()
+        ),
+    ])
+
+    # Заголовок дней недели
+    kb.append([
+        InlineKeyboardButton(text=day, callback_data="ignore")
+        for day in WEEKDAYS
+    ])
+
+    # Дни месяца
+    cal = calendar.Calendar(firstweekday=0)
+    today = datetime.now().date()
+
+    for week in cal.monthdayscalendar(year, month):
+        row = []
+        for day in week:
+            if day == 0:
+                row.append(InlineKeyboardButton(text=" ", callback_data="ignore"))
+            else:
+                # Проверяем что дата не в прошлом
+                check_date = datetime(year, month, day).date()
+                if check_date < today:
+                    row.append(InlineKeyboardButton(text="·", callback_data="ignore"))
+                elif day == selected_day:
+                    row.append(InlineKeyboardButton(
+                        text=f"[{day}]",
+                        callback_data=EditPublishCD(action="set_date", year=year, month=month, day=day).pack()
+                    ))
+                else:
+                    row.append(InlineKeyboardButton(
+                        text=str(day),
+                        callback_data=EditPublishCD(action="set_date", year=year, month=month, day=day).pack()
+                    ))
+        kb.append(row)
+
+    kb.append([InlineKeyboardButton(
+        text="⬅️ Назад",
+        callback_data=EditPublishCD(action="back").pack()
+    )])
+
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def build_time_picker_kb(selected_hour: int = 12, selected_minute: int = 0) -> InlineKeyboardMarkup:
+    """Клавиатура выбора времени."""
+    kb = []
+
+    # Часы (по 6 в ряд)
+    kb.append([InlineKeyboardButton(text="Выберите час:", callback_data="ignore")])
+
+    hours_row1 = []
+    hours_row2 = []
+    hours_row3 = []
+    hours_row4 = []
+
+    for h in range(0, 6):
+        mark = "✓" if h == selected_hour else ""
+        hours_row1.append(InlineKeyboardButton(
+            text=f"{mark}{h:02d}",
+            callback_data=EditPublishCD(action="set_time", hour=h, minute=selected_minute).pack()
+        ))
+
+    for h in range(6, 12):
+        mark = "✓" if h == selected_hour else ""
+        hours_row2.append(InlineKeyboardButton(
+            text=f"{mark}{h:02d}",
+            callback_data=EditPublishCD(action="set_time", hour=h, minute=selected_minute).pack()
+        ))
+
+    for h in range(12, 18):
+        mark = "✓" if h == selected_hour else ""
+        hours_row3.append(InlineKeyboardButton(
+            text=f"{mark}{h:02d}",
+            callback_data=EditPublishCD(action="set_time", hour=h, minute=selected_minute).pack()
+        ))
+
+    for h in range(18, 24):
+        mark = "✓" if h == selected_hour else ""
+        hours_row4.append(InlineKeyboardButton(
+            text=f"{mark}{h:02d}",
+            callback_data=EditPublishCD(action="set_time", hour=h, minute=selected_minute).pack()
+        ))
+
+    kb.append(hours_row1)
+    kb.append(hours_row2)
+    kb.append(hours_row3)
+    kb.append(hours_row4)
+
+    # Минуты (по 6 в ряд: 00, 10, 20, 30, 40, 50)
+    kb.append([InlineKeyboardButton(text="Выберите минуты:", callback_data="ignore")])
+
+    minutes_row = []
+    for m in [0, 10, 20, 30, 40, 50]:
+        mark = "✓" if m == selected_minute else ""
+        minutes_row.append(InlineKeyboardButton(
+            text=f"{mark}{m:02d}",
+            callback_data=EditPublishCD(action="set_time", hour=selected_hour, minute=m).pack()
+        ))
+    kb.append(minutes_row)
+
+    # Подтвердить
+    kb.append([InlineKeyboardButton(
+        text=f"✅ Подтвердить {selected_hour:02d}:{selected_minute:02d}",
+        callback_data=EditPublishCD(action="confirm", hour=selected_hour, minute=selected_minute).pack()
+    )])
+
+    kb.append([InlineKeyboardButton(
+        text="⬅️ Назад",
+        callback_data=EditPublishCD(action="back").pack()
+    )])
+
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def build_confirm_kb(target_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура подтверждения сохранения."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Да",
+                callback_data=EditPostCD(action="confirm_yes", target_id=target_id).pack()
+            ),
+            InlineKeyboardButton(
+                text="❌ Нет",
+                callback_data=EditPostCD(action="confirm_no", target_id=target_id).pack()
+            ),
+        ],
+    ])
+
+def build_back_to_edit_kb() -> InlineKeyboardMarkup:
+    """Кнопка назад при вводе времени."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=EditPublishCD(action="back").pack()
         )],
     ])
 

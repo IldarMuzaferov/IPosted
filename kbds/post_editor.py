@@ -71,6 +71,8 @@ class EditorState:
     text_position: str = "bottom"
     reply_to_channel_id: int | None = None
     reply_to_message_id: int | None = None
+    has_reactions: bool = False
+
 
     # Количество выбранных каналов (нужно для скрытия кнопок)
     selected_channels_count: int = 1
@@ -138,6 +140,11 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: 'EditorContext') -> Inli
             InlineKeyboardButton(text="Прикрепить медиа",
                                  callback_data=EditorCD(action="attach_media", post_id=post_id).pack()),
         ])
+        reaction_text = "✅ Реакции" if st.has_reactions else " Реакции"
+        kb.append([types.InlineKeyboardButton(
+            text=reaction_text,
+            callback_data=EditorCD(action="reactions", post_id=post_id).pack()
+        )])
 
     # ========== КНОПКА ПОЗИЦИИ ТЕКСТА (только для фото/видео с текстом) ==========
     if ctx.has_media and ctx.has_text and ctx.kind in ("photo", "other_media"):
@@ -162,10 +169,6 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: 'EditorContext') -> Inli
         InlineKeyboardButton(
             text=bell_label,
             callback_data=EditorCD(action="toggle", post_id=post_id, key="bell").pack()
-        ),
-        InlineKeyboardButton(
-            text=_with_check("Реакции", st.reactions),
-            callback_data=EditorCD(action="toggle", post_id=post_id, key="reactions").pack()
         ),
     ])
 

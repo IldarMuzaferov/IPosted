@@ -12,6 +12,9 @@ class CreatePostStates(StatesGroup):
     choosing_channels = State()
     composing = State()  # следующий этап: принимаем контент поста
     # дальше добавим: editing_settings, choosing_time, confirming
+    editing = State()
+    entering_reactions = State()
+
 
 class ConnectChannelStates(StatesGroup):
     waiting_channel = State()
@@ -21,6 +24,9 @@ class EditTextStates(StatesGroup):
 
 class AttachMediaStates(StatesGroup):
     waiting_media = State()
+
+class ReactionStates(StatesGroup):
+    entering_emojis = State()
 
 class UrlButtonsStates(StatesGroup):
     waiting_buttons = State()
@@ -67,6 +73,22 @@ class CreatePostCD(CallbackData, prefix="cp"):
     action: str
     folder_id: int = 0
     channel_id: int = 0
+class EditPostCD(CallbackData, prefix="editpost"):
+    """Изменение существующего поста."""
+    action: str  # cancel | timer | publish_time | save | confirm_yes | confirm_no | back
+    target_id: int = 0
+
+
+class EditTimerCD(CallbackData, prefix="edittimer"):
+    """Выбор таймера удаления."""
+    action: str  # select | back
+    minutes: int = 0  # 0 = не нужно
+
+
+class EditPublishCD(CallbackData, prefix="editpub"):
+    """Выбор времени публикации."""
+    action: str  # now | schedule | back
+
 
 #======================================================================================
 class SettingsStates(StatesGroup):
@@ -156,6 +178,16 @@ class ContentPlanCalendarCD(CallbackData, prefix="cpcal"):
     month: int = 0
     day: int = 0
 
+
+class ReactionCD(CallbackData, prefix="reaction"):
+    """Callback для клика на кнопку-реакцию."""
+    button_id: int
+
+
+class ReactionSetupCD(CallbackData, prefix="rsetup"):
+    """Callback для настройки реакций."""
+    action: str  # back | clear | confirm
+    post_id: int = 0
 
 class ContentPlanPostCD(CallbackData, prefix="cppost"):
     """Действия с постом."""

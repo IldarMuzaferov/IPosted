@@ -729,6 +729,8 @@ async def orm_get_target_full(session: AsyncSession, *, target_id: int) -> PostT
             joinedload(PostTarget.post).selectinload(Post.buttons),
             joinedload(PostTarget.post).selectinload(Post.hidden_part),
             selectinload(PostTarget.reply),
+            joinedload(PostTarget.post).selectinload(Post.reaction_buttons),
+
         )
     )
     res = await session.execute(q)

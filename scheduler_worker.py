@@ -16,6 +16,7 @@ from aiogram.types import (
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
+from database.engine import session_maker
 from database.models import PostTarget, TargetState, MediaType, PostEventType, PostEvent
 from database.orm_query import (
     orm_pick_targets_to_publish,
@@ -26,6 +27,11 @@ from database.orm_query import (
     orm_mark_target_autodeleted,
     orm_log_post_event,
 )
+import logging
+
+from kbds.callbacks import ReactionCD
+
+logger = logging.getLogger(__name__)
 
 
 def _build_url_kb(buttons) -> InlineKeyboardMarkup | None:
@@ -379,7 +385,83 @@ def _build_post_kb(post) -> InlineKeyboardMarkup | None:
             )
         ])
 
-    if not kb_rows:
-        return None
 
-    return InlineKeyboardMarkup(inline_keyboard=kb_rows)
+        # 3. Кнопки реакций
+    if hasattr(post, 'reaction_buttons') and post.reaction_buttons:
+        reaction_rows_map: dict[int, list] = {}
+        for btn in post.reaction_buttons:
+            if btn.row not in reaction_rows_map:
+                reaction_rows_map[btn.row] = []
+            reaction_rows_map[btn.row].append(btn)
+
+        for row_idx in sorted(reaction_rows_map.keys()):
+            sorted_btns = sorted(reaction_rows_map[row_idx], key=lambda b: b.position)
+            reaction_row = []
+            for btn in sorted_btns:
+                count_str = f" {btn.click_count}" if btn.click_count > 0 else ""
+                reaction_row.append(
+                    InlineKeyboardButton(
+                        text=f"{btn.emoji}{count_str}",
+                        callback_data=ReactionCD(button_id=btn.id).pack()
+                    )
+                )
+            if reaction_row:
+                kb_rows.append(reaction_row)
+
+    return InlineKeyboardMarkup(inline_keyboard=kb_rows) if kb_rows else None
+
+async def check_auto_delete(bot: Bot):
+    """
+    Фоновая задача для автоудаления постов.
+    Проверяет каждые 30 секунд.
+    """
+    logger.info("Auto-delete task started")
+
+    while True:
+        try:
+            async with session_maker() as session:
+                now = datetime.utcnow()
+
+                # Находим посты для удаления
+                q = (
+                    select(PostTarget)
+                    .where(PostTarget.auto_deleted == False)
+                    .where(PostTarget.auto_delete_at.isnot(None))
+                    .where(PostTarget.auto_delete_at <= now)
+                    .where(PostTarget.state == TargetState.sent)
+                    .where(PostTarget.sent_message_id.isnot(None))
+                )
+
+                result = await session.execute(q)
+                targets = result.scalars().all()
+
+                for target in targets:
+                    try:
+                        # Удаляем сообщение из канала
+                        await bot.delete_message(
+                            chat_id=target.channel_id,
+                            message_id=target.sent_message_id,
+                        )
+
+                        # Помечаем как удалённое
+                        target.auto_deleted = True
+
+                        logger.info(f"Auto-deleted message {target.sent_message_id} from channel {target.channel_id}")
+
+                    except Exception as e:
+                        error_msg = str(e).lower()
+                        logger.error(f"Failed to auto-delete target {target.id}: {e}")
+
+                        # Если сообщение уже удалено - помечаем как удалённое
+                        if "message to delete not found" in error_msg or "message can't be deleted" in error_msg:
+                            target.auto_deleted = True
+                            logger.info(f"Marked target {target.id} as deleted (message already gone)")
+
+                await session.commit()
+
+        except Exception as e:
+            logger.error(f"Error in check_auto_delete: {e}")
+
+        # Ждём 30 секунд
+        await asyncio.sleep(30)
+

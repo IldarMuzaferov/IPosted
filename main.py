@@ -1,18 +1,24 @@
 from create_bot import dp, bot
 import asyncio
 
+from handlers.comments_blocker import comments_router
 from handlers.content_plan_handlers import content_plan_router
+from handlers.edit_post_handlers import edit_post_router
 from handlers.hidden_callback import hidden_callback_router
 from handlers.settings_handlers import settings_router
 from middlewares.db import DataBaseSession
 from database.engine import create_db, drop_db, session_maker
-from handlers.user_private import user_private_router
-from scheduler_worker import scheduler_loop
+from handlers.user_private import user_private_router, update_all_channels_linked_chat
+from scheduler_worker import scheduler_loop, check_auto_delete
 
+dp.include_router(comments_router)
+dp.include_router(edit_post_router)
 dp.include_router(user_private_router)
 dp.include_router(hidden_callback_router)
 dp.include_router(settings_router)
 dp.include_router(content_plan_router)
+
+
 
 
 async def on_startup():
@@ -21,7 +27,8 @@ async def on_startup():
         await drop_db()
     await create_db()
     dp["scheduler_task"] = asyncio.create_task(scheduler_loop(bot, session_maker))
-
+    #asyncio.create_task(check_auto_delete(bot))
+    await update_all_channels_linked_chat(bot, session_maker)
 
 
 async def main():
