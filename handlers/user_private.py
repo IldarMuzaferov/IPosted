@@ -15,14 +15,16 @@ from database.models import TgMemberStatus, PostEventType
 from database.orm_query import orm_get_user_channels, orm_get_free_channels_for_user, orm_get_folder_channels, \
     orm_get_user_folders, orm_add_channel_admin, orm_upsert_channel, orm_upsert_user, orm_create_post_from_message, \
     orm_edit_post_text, orm_add_media_to_post, orm_get_post_full, orm_set_target_autodelete, orm_publish_target_now, \
-    orm_log_post_event, orm_schedule_target, orm_set_post_flags, orm_set_reply_target_forwarded, orm_get_user
+    orm_log_post_event, orm_schedule_target, orm_set_post_flags, orm_set_reply_target_forwarded, orm_get_user, \
+    orm_get_channels_without_folder
 from filters.chat_types import ChatTypeFilter
 from handlers.comments_blocker import show_comments_warning_if_needed
 from kbds.callbacks import CreatePostCD, CreatePostStates, ConnectChannelStates, EditTextStates, AttachMediaStates, \
     UrlButtonsStates, PublishStates, PublishCD, ReactionCD, ReactionStates
-from kbds.inline import ik_create_post_menu, ik_create_root_menu, ik_channels_menu, ik_after_channel_connected, ik_folders_empty, \
+from kbds.inline import ik_create_post_menu, ik_create_root_menu, ik_channels_menu, ik_after_channel_connected, \
+    ik_folders_empty, \
     ik_folder_channels, ik_folders_list, ik_edit_text_controls, ik_attach_media_controls, ik_send_mode, ik_delete_after, \
-    ik_confirm_publish, ik_finish_nav, build_settings_main_kb
+    ik_confirm_publish, ik_finish_nav, build_settings_main_kb, build_content_plan_main_kb
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime as dt_utc
 from kbds.post_editor import build_copy_channels_kb, EditorContext, editor_ctx_to_dict
@@ -2370,6 +2372,23 @@ async def finish_create(call: types.CallbackQuery, state: FSMContext, session: A
         reply_markup=ik_create_root_menu(),
     )
     await call.answer()
+
+@user_private_router.callback_query(F.data == "finish:content_plan")
+async def finish_content_plan(call: types.CallbackQuery, state: FSMContext, session: AsyncSession):
+    # Чтобы контент-план открывался “чисто”
+    await state.clear()
+
+    folders = await orm_get_user_folders(session, user_id=call.from_user.id)
+    no_folder_channels = await orm_get_channels_without_folder(session, user_id=call.from_user.id)
+
+    kb = build_content_plan_main_kb(
+        folders=folders,
+        has_no_folder_channels=bool(no_folder_channels),
+    )
+
+    await call.message.answer("📋 Контент-план:", reply_markup=kb)
+    await call.answer()
+
 
 REPLY_POST_INTRO = (
     "📨 <b>ОТВЕТНЫЙ ПОСТ</b>\n\n"

@@ -11,9 +11,9 @@ from database.engine import create_db, drop_db, session_maker
 from handlers.user_private import user_private_router, update_all_channels_linked_chat
 from scheduler_worker import scheduler_loop, check_auto_delete
 
-dp.include_router(comments_router)
 dp.include_router(edit_post_router)
 dp.include_router(user_private_router)
+dp.include_router(comments_router)
 dp.include_router(hidden_callback_router)
 dp.include_router(settings_router)
 dp.include_router(content_plan_router)

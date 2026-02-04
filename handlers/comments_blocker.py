@@ -14,87 +14,79 @@ comments_router = Router()
 comments_router.message.filter(ChatTypeFilter(["group", "supergroup"]))
 
 
-@comments_router.message()
-async def test_all_messages(message: types.Message):
-    print(f"[TEST] chat_id={message.chat.id}, type={message.chat.type}")
-    print(f"[TEST] reply_to_message = {message.reply_to_message}")
-    print(f"[TEST] is_topic_message = {getattr(message, 'is_topic_message', None)}")
-    print(f"[TEST] message_thread_id = {getattr(message, 'message_thread_id', None)}")
-
-    if message.reply_to_message:
-        print(f"[TEST] reply_to sender_chat = {message.reply_to_message.sender_chat}")
+# @comments_router.message()
+# async def test_all_messages(message: types.Message):
+#     print(f"[TEST] chat_id={message.chat.id}, type={message.chat.type}")
+#     print(f"[TEST] reply_to_message = {message.reply_to_message}")
+#     print(f"[TEST] is_topic_message = {getattr(message, 'is_topic_message', None)}")
+#     print(f"[TEST] message_thread_id = {getattr(message, 'message_thread_id', None)}")
+#
+#     if message.reply_to_message:
+#         print(f"[TEST] reply_to sender_chat = {message.reply_to_message.sender_chat}")
 
 
 @comments_router.message()
 async def check_and_delete_comment(message: types.Message, session: AsyncSession):
-    """Проверяет и удаляет комментарий если comments_enabled=False."""
-
-    # Пропускаем автоматически пересланные посты из канала
-    if getattr(message, 'is_automatic_forward', False):
-        print(f"[DEBUG] Пропускаем автопересылку")
-        return
+    """Удаляет либо корневой автопост (чтобы вырубить комменты), либо сами комментарии."""
 
     chat_id = message.chat.id
-    print(f"[DEBUG 1] Сообщение в чате {chat_id}")
+    is_auto = bool(getattr(message, "is_automatic_forward", False))
 
-    # Проверяем что это комментарий (есть message_thread_id)
-    thread_id = getattr(message, 'message_thread_id', None)
-    if not thread_id:
-        print(f"[DEBUG 1.1] Нет thread_id - это не комментарий")
-        return
+    print(f"[DEBUG] msg chat_id={chat_id} auto={is_auto} mid={message.message_id} thread_id={getattr(message,'message_thread_id',None)}")
 
-    print(f"[DEBUG 2] thread_id = {thread_id}")
-
-    # Ищем канал по linked_chat_id
-    result = await session.execute(
-        select(Channel).where(Channel.linked_chat_id == chat_id)
-    )
+    # 1) Находим канал по linked_chat_id группы
+    result = await session.execute(select(Channel).where(Channel.linked_chat_id == chat_id))
     channel = result.scalar_one_or_none()
-
     if not channel:
-        print(f"[DEBUG 3] Канал не найден для linked_chat_id={chat_id}")
+        print(f"[DEBUG] Канал не найден для linked_chat_id={chat_id}")
         return
 
-    print(f"[DEBUG 4] Канал: {channel.title}, id={channel.id}")
-
-    # Ищем пост по thread_id (message_id пересланного поста в группе = thread_id)
-    # Или по forward_from_message_id из reply_to_message
-
+    # 2) Определяем message_id поста в КАНАЛЕ (он же ключ для поиска PostTarget)
     channel_msg_id = None
-    if message.reply_to_message:
-        channel_msg_id = getattr(message.reply_to_message, 'forward_from_message_id', None)
-        print(f"[DEBUG 5] forward_from_message_id = {channel_msg_id}")
+
+    if is_auto:
+        # Автопост в группе обсуждений
+        channel_msg_id = getattr(message, "forward_from_message_id", None) or message.message_id
+    else:
+        # Комментарий в треде
+        # Самый стабильный вариант — message_thread_id (в TG он равен id корневого сообщения)
+        channel_msg_id = getattr(message, "message_thread_id", None)
+
+        # fallback: если вдруг thread_id нет, попробуем через reply_to_message
+        if not channel_msg_id and message.reply_to_message:
+            channel_msg_id = getattr(message.reply_to_message, "forward_from_message_id", None) \
+                             or getattr(message.reply_to_message, "message_id", None)
 
     if not channel_msg_id:
-        print(f"[DEBUG 5.1] Не удалось определить ID поста в канале")
+        print("[DEBUG] Не удалось определить channel_msg_id")
         return
 
-    # Ищем пост
+    # 3) Ищем опубликованный target
     target_result = await session.execute(
         select(PostTarget)
         .where(PostTarget.channel_id == channel.id)
-        .where(PostTarget.sent_message_id == channel_msg_id)
+        .where(PostTarget.sent_message_id == int(channel_msg_id))
         .options(selectinload(PostTarget.post))
     )
     target = target_result.scalar_one_or_none()
 
     if not target or not target.post:
-        print(f"[DEBUG 6] Пост не найден: channel_id={channel.id}, sent_message_id={channel_msg_id}")
+        print(f"[DEBUG] Target не найден: channel_id={channel.id}, sent_message_id={channel_msg_id}")
         return
-
-    print(f"[DEBUG 7] Пост найден: id={target.post.id}, comments_enabled={target.post.comments_enabled}")
 
     if target.post.comments_enabled:
-        print(f"[DEBUG 7.1] Комментарии включены - не удаляем")
+        print("[DEBUG] comments_enabled=True -> ничего не удаляем")
         return
 
-    # Удаляем!
-    print(f"[DEBUG 8] УДАЛЯЕМ комментарий!")
+    # 4) Удаление
     try:
+        if is_auto:
+            print("[DEBUG] comments_enabled=False -> удаляем КОРЕНЬ треда (автопост) чтобы отключить комментарии")
+        else:
+            print("[DEBUG] comments_enabled=False -> удаляем комментарий")
         await message.delete()
-        print(f"[DEBUG 9] Удалено!")
     except Exception as e:
-        print(f"[DEBUG 9] Ошибка: {e}")
+        print(f"[DEBUG] Ошибка удаления: {e}")
 
 
 async def update_channel_linked_chat(
@@ -195,3 +187,81 @@ async def show_comments_warning_if_needed(
         return True
 
     return False
+
+@comments_router.message()
+async def comments_guard(message: types.Message, session: AsyncSession):
+    chat_id = message.chat.id
+
+    # 1) Ловим автопересылку поста из канала в группу обсуждения
+    if getattr(message, "is_automatic_forward", False):
+        sender_chat = getattr(message, "sender_chat", None)  # у автопересылки это канал
+        channel_id = getattr(sender_chat, "id", None)
+        channel_msg_id = getattr(message, "forward_from_message_id", None)
+
+        print(f"[DBG-AF] linked_chat={chat_id} sender_chat={channel_id} channel_msg_id={channel_msg_id}")
+
+        if not channel_id or not channel_msg_id:
+            return
+
+        # Находим канал (можно и по id, и по linked_chat_id — но по sender_chat.id надёжнее)
+        channel = await session.get(Channel, channel_id)
+        if not channel:
+            return
+
+        # Находим PostTarget по (channel_id, sent_message_id)
+        res = await session.execute(
+            select(PostTarget)
+            .where(PostTarget.channel_id == channel.id)
+            .where(PostTarget.sent_message_id == channel_msg_id)
+            .options(selectinload(PostTarget.post))
+        )
+        target = res.scalar_one_or_none()
+        if not target or not target.post:
+            print("[DBG-AF] target/post not found")
+            return
+
+        print(f"[DBG-AF] post_id={target.post.id} comments_enabled={target.post.comments_enabled}")
+
+        if not target.post.comments_enabled:
+            try:
+                await message.delete()  # <-- удаляем корень обсуждения => комментарии исчезают
+                print("[DBG-AF] deleted auto-forward root message")
+            except Exception as e:
+                print(f"[DBG-AF] delete failed: {e}")
+
+        return
+
+    # 2) Ловим обычные комментарии (ответы) и удаляем, если надо
+    thread_id = getattr(message, "message_thread_id", None)
+    if not thread_id:
+        return
+
+    if not message.reply_to_message:
+        return
+
+    channel_msg_id = getattr(message.reply_to_message, "forward_from_message_id", None)
+    if not channel_msg_id:
+        return
+
+    # Ищем канал по linked_chat_id
+    res = await session.execute(select(Channel).where(Channel.linked_chat_id == chat_id))
+    channel = res.scalar_one_or_none()
+    if not channel:
+        return
+
+    res = await session.execute(
+        select(PostTarget)
+        .where(PostTarget.channel_id == channel.id)
+        .where(PostTarget.sent_message_id == channel_msg_id)
+        .options(selectinload(PostTarget.post))
+    )
+    target = res.scalar_one_or_none()
+    if not target or not target.post:
+        return
+
+    if not target.post.comments_enabled:
+        try:
+            await message.delete()
+            print("[DBG-CM] deleted comment")
+        except Exception as e:
+            print(f"[DBG-CM] delete comment failed: {e}")
