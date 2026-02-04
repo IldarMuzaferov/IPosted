@@ -147,8 +147,7 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: 'EditorContext') -> Inli
         )])
 
     # ========== КНОПКА ПОЗИЦИИ ТЕКСТА (только для фото/видео с текстом) ==========
-    if ctx.has_media and ctx.has_text and ctx.kind in ("photo", "other_media"):
-        # Показываем ТЕКУЩУЮ позицию и что будет при нажатии
+    if ctx.has_media and ctx.has_text and ctx.kind in ("photo", "other_media") and not getattr(ctx, 'is_album', False):        # Показываем ТЕКУЩУЮ позицию и что будет при нажатии
         if st.text_position == "top":
             pos_btn_text = "📝 Текст сверху → снизу"
         else:
@@ -477,6 +476,7 @@ class EditorContext:
     has_text: bool
     text_was_initial: bool
     text_added_later: bool
+    is_album: bool = False
 
 class ReplyPostCD(CallbackData, prefix="reply"):
     """CallbackData для ответного поста."""

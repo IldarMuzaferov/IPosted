@@ -42,6 +42,10 @@ from kbds.post_editor import UrlButtonsCD, build_url_buttons_prompt_kb, merge_ur
 from database.orm_query import orm_save_post_buttons, orm_delete_post_buttons, orm_get_post_buttons
 from database.models import PostReactionButton, ReactionClick, Post
 
+from zoneinfo import ZoneInfo
+
+
+
 user_private_router = Router()
 user_private_router.message.filter(ChatTypeFilter(["private"]))
 
@@ -979,7 +983,6 @@ async def editor_attach_media(call: types.CallbackQuery, callback_data: EditorCD
 
     await call.answer()
 
-
 @user_private_router.message(
     StateFilter(AttachMediaStates.waiting_media),
     F.content_type.in_([
@@ -995,6 +998,12 @@ async def editor_attach_media(call: types.CallbackQuery, callback_data: EditorCD
 async def attach_media_receive(message: types.Message, state: FSMContext, session: AsyncSession):
     '''Пользователь прислал медиа - прикрепляем к посту.'''
     data = await state.get_data()
+    if message.media_group_id:
+        processed_album = data.get("attach_media_processed_album")
+        if processed_album == message.media_group_id:
+            # Уже обработали первое фото - игнорируем остальные
+            return
+        await state.update_data(attach_media_processed_album=message.media_group_id)
 
     post_id = int(data["attach_media_post_id"])
     preview_chat_id = int(data["attach_media_preview_chat_id"])
@@ -1659,16 +1668,30 @@ async def editor_continue(call: types.CallbackQuery, callback_data: EditorCD, st
     await call.answer()
 
 @user_private_router.callback_query(PublishCD.filter(F.action == "later"))
-async def publish_later(call: types.CallbackQuery, callback_data: PublishCD, state: FSMContext):
+async def publish_later(call: types.CallbackQuery, callback_data: PublishCD, state: FSMContext, session: AsyncSession):
+    user = await orm_get_user(session, user_id=call.from_user.id)
+    user_tz = user.timezone if user else "Europe/Moscow"
+
+    tz_names = {
+        "Europe/Moscow": "Москва GMT+3",
+        "Europe/Kiev": "Киев GMT+2",
+        "Europe/London": "Лондон GMT+0",
+        "Asia/Almaty": "Алматы GMT+6",
+        "Asia/Vladivostok": "Владивосток GMT+10",
+    }
+    tz_display = tz_names.get(user_tz, user_tz)
+
     await state.update_data(
         publish_post_id=int(callback_data.post_id),
         publish_send_mode="later",
+        publish_user_timezone=user_tz,
     )
     await state.set_state(PublishStates.waiting_datetime)
 
     await call.message.answer(
-        "Введите время размещения в вашем часовом поясе (Москва GMT +3). Сменить дату размещения можно в настройках\n\n"
-        "Например: 18:01 16.8.2020"
+        f"Введите время размещения в вашем часовом поясе ({tz_display}).\\n"
+        f"Сменить часовой пояс можно в настройках.\\n\\n"
+        f"Например: 18:01 16.8.2025"
     )
     await call.answer()
 
@@ -1696,13 +1719,26 @@ async def publish_receive_datetime(message: types.Message, state: FSMContext):
         await message.answer("Неверный формат. Пример: 18:01 16.8.2020")
         return
 
-    await state.update_data(publish_scheduled_dt=user_dt.isoformat())
+    data = await state.get_data()
+    user_tz_name = data.get("publish_user_timezone", "Europe/Moscow")
+
+    # Конвертируем локальное время в UTC для scheduler
+    try:
+        user_tz = ZoneInfo(user_tz_name)
+        local_dt = user_dt.replace(tzinfo=user_tz)
+        utc_dt = local_dt.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    except Exception:
+        utc_dt = user_dt
+
+    await state.update_data(
+        publish_scheduled_dt=utc_dt.isoformat(),
+        publish_display_dt=user_dt.isoformat(),
+    )
     await state.set_state(PublishStates.choosing_delete_after)
 
-    post_id = int((await state.get_data()).get("publish_post_id"))
+    post_id = int(data.get("publish_post_id"))
     await message.answer(
-        "Вы можете установить через какое время после выхода поста, он будет удалён. "
-        "Задайте время, через которое нужно удалить пост, введя время вручную.",
+        "Вы можете установить через какое время после выхода поста, он будет удалён.",
         reply_markup=ik_delete_after(post_id),
     )
 
@@ -1821,22 +1857,33 @@ async def publish_confirm_yes(call: types.CallbackQuery, callback_data: PublishC
     await state.clear()
     await call.answer()
 
+
 @user_private_router.callback_query(PublishCD.filter(F.action == "now"))
-async def publish_now(call: types.CallbackQuery, callback_data: PublishCD, state: FSMContext):
-    # фиксируем post_id
-    await state.update_data(publish_post_id=int(callback_data.post_id), publish_send_mode="now")
+async def publish_now(call: types.CallbackQuery, callback_data: PublishCD, state: FSMContext, session: AsyncSession):
+    """Опубликовать сейчас."""
+    # Получаем часовой пояс для отображения
+    user = await orm_get_user(session, user_id=call.from_user.id)
+    user_tz_name = user.timezone if user else "Europe/Moscow"
 
+    try:
+        user_tz = ZoneInfo(user_tz_name)
+        now_local = datetime.now(user_tz).replace(tzinfo=None)
+    except Exception:
+        now_local = datetime.utcnow()
 
-    # чтобы в финальном сообщении была понятная дата публикации, ставим "сейчас" в МСК
-    MSK = timezone(timedelta(hours=3))
-    now_msk = datetime.now(MSK).replace(tzinfo=None)
-    await state.update_data(publish_scheduled_dt=now_msk.isoformat())
+    now_utc = datetime.utcnow()
+
+    await state.update_data(
+        publish_post_id=int(callback_data.post_id),
+        publish_send_mode="now",
+        publish_scheduled_dt=now_utc.isoformat(),
+        publish_display_dt=now_local.isoformat(),
+    )
 
     await state.set_state(PublishStates.choosing_delete_after)
 
     await call.message.answer(
-        "Вы можете установить через какое время после выхода поста, он будет удалён. "
-        "Задайте время, через которое нужно удалить пост, введя время вручную.",
+        "Вы можете установить через какое время после выхода поста, он будет удалён.",
         reply_markup=ik_delete_after(int(callback_data.post_id)),
     )
     await call.answer()

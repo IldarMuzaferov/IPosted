@@ -57,7 +57,7 @@ CONTENT_PLAN_MAIN_TEXT = (
 
 CONTENT_PLAN_DAY_TEXT = (
     "📊 <b>КОНТЕНТ-ПЛАН</b>\n\n"
-    "На {date_str} в канале <b>{channel_name}</b> "
+    "На {date_str} в {channel_name} "
     "{posts_text}."
 )
 
@@ -308,15 +308,31 @@ async def _show_day_view(call: types.CallbackQuery, state: FSMContext, session: 
     date_str = format_date_full(target_date)
 
     if single_channel and channel_ids:
-        # Получаем название канала
+        # Один канал
         from database.orm_query import orm_get_channel
         try:
             channel = await orm_get_channel(session, channel_id=channel_ids[0])
-            channel_name = channel.title if channel else "канал"
+            channel_name = f"«{channel.title}»" if channel else "канал"
         except Exception:
             channel_name = "канал"
     else:
-        channel_name = "выбранных каналах"
+        # Несколько каналов - получаем их названия
+        from database.orm_query import orm_get_channel
+        channel_names = []
+        for ch_id in channel_ids[:5]:  # Максимум 5 названий
+            try:
+                ch = await orm_get_channel(session, channel_id=ch_id)
+                if ch:
+                    channel_names.append(f"«{ch.title}»")
+            except Exception:
+                pass
+
+        if len(channel_ids) > 5:
+            channel_name = ", ".join(channel_names) + f" и ещё {len(channel_ids) - 5}"
+        elif channel_names:
+            channel_name = ", ".join(channel_names)
+        else:
+            channel_name = "выбранных каналах"
 
     posts_text = posts_count_text(len(targets))
 

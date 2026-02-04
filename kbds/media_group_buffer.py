@@ -115,6 +115,7 @@ async def _finalize_album(key: tuple[int, int, str], state: FSMContext, session:
 
     # Создаём контекст
     ctx = make_ctx_from_message(album_msgs[0])
+    ctx.is_album = True
 
     # Сохраняем информацию об альбоме в state
     await state.update_data(
