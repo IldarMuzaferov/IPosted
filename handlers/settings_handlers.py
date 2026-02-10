@@ -4,6 +4,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from database.models import User
 from filters.chat_types import ChatTypeFilter
 from kbds.inline import (
     SettingsCD, TimezoneCD, FoldersCD, FolderEditCD, FolderChannelsCD,
@@ -68,11 +69,19 @@ ADD_CHANNEL_FROM_SETTINGS_TEXT = (
 # =============================================================================
 # ГЛАВНОЕ МЕНЮ НАСТРОЕК
 # =============================================================================
-
+async def get_or_create_user(session: AsyncSession, telegram_user: types.User) -> User:
+    """Получает пользователя из БД или создает нового."""
+    from database.orm_query import orm_upsert_user
+    return await orm_upsert_user(
+        session,
+        user_id=telegram_user.id,
+        username=telegram_user.username,
+        first_name=telegram_user.first_name,
+    )
 @settings_router.callback_query(SettingsCD.filter(F.action == "main"))
 async def settings_main(call: types.CallbackQuery, state: FSMContext, session: AsyncSession):
     """Открыть главное меню настроек."""
-    user = await orm_get_user(session, user_id=call.from_user.id)
+    user = await get_or_create_user(session, call.from_user)
     user_tz = user.timezone if user else "Europe/Moscow"
 
     await call.message.edit_text(
@@ -193,6 +202,7 @@ async def settings_receive_channel(message: types.Message, state: FSMContext, se
         channel_id=chat.id,
         user_id=message.from_user.id,
     )
+    await get_or_create_user(session, message.from_user)
     await session.commit()
 
     # Возвращаемся в настройки
@@ -221,7 +231,7 @@ async def settings_receive_channel(message: types.Message, state: FSMContext, se
 @settings_router.callback_query(SettingsCD.filter(F.action == "timezone"))
 async def settings_timezone(call: types.CallbackQuery, session: AsyncSession):
     """Открыть выбор часового пояса."""
-    user = await orm_get_user(session, user_id=call.from_user.id)
+    user = await get_or_create_user(session, call.from_user)
     user_tz = user.timezone if user else "Europe/Moscow"
 
     # Находим отображаемое имя
@@ -267,7 +277,7 @@ async def timezone_select(call: types.CallbackQuery, callback_data: TimezoneCD, 
 @settings_router.callback_query(TimezoneCD.filter(F.action == "back"))
 async def timezone_back(call: types.CallbackQuery, session: AsyncSession):
     """Возврат в настройки из часового пояса."""
-    user = await orm_get_user(session, user_id=call.from_user.id)
+    user = await get_or_create_user(session, call.from_user)
     user_tz = user.timezone if user else "Europe/Moscow"
 
     await call.message.edit_text(
@@ -298,7 +308,7 @@ async def settings_folders(call: types.CallbackQuery, session: AsyncSession):
 @settings_router.callback_query(FoldersCD.filter(F.action == "back"))
 async def folders_back(call: types.CallbackQuery, session: AsyncSession):
     """Возврат в настройки из папок."""
-    user = await orm_get_user(session, user_id=call.from_user.id)
+    user = await get_or_create_user(session, call.from_user)
     user_tz = user.timezone if user else "Europe/Moscow"
 
     await call.message.edit_text(

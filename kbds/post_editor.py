@@ -140,11 +140,7 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: 'EditorContext') -> Inli
             InlineKeyboardButton(text="Прикрепить медиа",
                                  callback_data=EditorCD(action="attach_media", post_id=post_id).pack()),
         ])
-        reaction_text = "✅ Реакции" if st.has_reactions else " Реакции"
-        kb.append([types.InlineKeyboardButton(
-            text=reaction_text,
-            callback_data=EditorCD(action="reactions", post_id=post_id).pack()
-        )])
+
 
     # ========== КНОПКА ПОЗИЦИИ ТЕКСТА (только для фото/видео с текстом) ==========
     if ctx.has_media and ctx.has_text and ctx.kind in ("photo", "other_media") and not getattr(ctx, 'is_album', False):        # Показываем ТЕКУЩУЮ позицию и что будет при нажатии
@@ -170,6 +166,11 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: 'EditorContext') -> Inli
             callback_data=EditorCD(action="toggle", post_id=post_id, key="bell").pack()
         ),
     ])
+    reaction_text = "✅ Реакции" if st.has_reactions else " Реакции"
+    kb.append([types.InlineKeyboardButton(
+        text=reaction_text,
+        callback_data=EditorCD(action="reactions", post_id=post_id).pack()
+    )])
 
     # URL-Кнопки
     url_btn_text = "✅ URL-Кнопки" if st.has_url_buttons else "URL-Кнопки"
@@ -189,6 +190,12 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: 'EditorContext') -> Inli
         InlineKeyboardButton(
             text=_with_check("Закрепить", st.pin),
             callback_data=EditorCD(action="toggle", post_id=post_id, key="pin").pack()
+        ),
+    ])
+    kb.append([
+        InlineKeyboardButton(
+            text=_with_check("Репост", st.repost),
+            callback_data=EditorCD(action="toggle", post_id=post_id, key="repost").pack()
         ),
     ])
 

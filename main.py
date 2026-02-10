@@ -28,10 +28,11 @@ async def on_startup():
     await create_db()
     dp["scheduler_task"] = asyncio.create_task(scheduler_loop(bot, session_maker))
     #asyncio.create_task(check_auto_delete(bot))
-    await update_all_channels_linked_chat(bot, session_maker)
+    #await update_all_channels_linked_chat(bot, session_maker)
 
 
 async def main():
+    #await drop_db()
     dp.startup.register(on_startup)
     dp.update.middleware(DataBaseSession(session_pool=session_maker))
     await bot.delete_webhook(drop_pending_updates=True)

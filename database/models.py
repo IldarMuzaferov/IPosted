@@ -228,6 +228,8 @@ class Post(Base):
     text_position: Mapped[str] = mapped_column(String(10), nullable=False, default="bottom")
     reactions_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)  # Реакции
     is_repost: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # Репост
+    source_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     # Version for optimistic locking when editing
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -402,6 +404,7 @@ class PostTarget(Base):
     auto_delete_after: Mapped[timedelta | None] = mapped_column(Interval, nullable=True)
     auto_delete_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     auto_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    discussion_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 

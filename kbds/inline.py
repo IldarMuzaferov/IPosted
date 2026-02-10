@@ -176,7 +176,7 @@ def ik_channels_picker(
 def ik_after_channel_connected() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Создать пост", callback_data=CreatePostCD(action="menu").pack())],
-        [InlineKeyboardButton(text="Добавить еще канал", callback_data=CreatePostCD(action="add_channel").pack())],
+        [InlineKeyboardButton(text="Добавить еще канал", callback_data=CreatePostCD(action="add_channel").pack())], #add_channel
     ])
 
 def ik_folders_list(folders: list) -> InlineKeyboardMarkup:

@@ -169,25 +169,35 @@ async def orm_update_user_timezone(session: AsyncSession, *, user_id: int, timez
 # ---------------------------------------------------------------------
 
 async def orm_upsert_channel(
-    session: AsyncSession,
-    *,
-    channel_id: int,
-    title: str,
-    username: str | None,
-    is_private: bool,
-) -> Channel:
-    ch = await session.get(Channel, channel_id)
-    if ch is None:
-        ch = Channel(id=channel_id, title=title, username=username, is_private=is_private)
-        session.add(ch)
-        await session.flush()
-        return ch
+        session: AsyncSession,
+        channel_id: int,
+        title: str,
+        username: str | None = None,
+        is_private: bool = False,
+        linked_chat_id: int | None = None,  # <-- ДОБАВИТЬ
+):
+    """Создаёт или обновляет канал."""
+    from database.models import Channel
 
-    ch.title = title
-    ch.username = username
-    ch.is_private = is_private
-    await session.flush()
-    return ch
+    channel = await session.get(Channel, channel_id)
+
+    if channel:
+        # Обновляем
+        channel.title = title
+        channel.username = username
+        channel.is_private = is_private
+        if linked_chat_id is not None:  # <-- ДОБАВИТЬ
+            channel.linked_chat_id = linked_chat_id
+    else:
+        # Создаём новый
+        channel = Channel(
+            id=channel_id,
+            title=title,
+            username=username,
+            is_private=is_private,
+            linked_chat_id=linked_chat_id,  # <-- ДОБАВИТЬ
+        )
+        session.add(channel)
 
 
 async def orm_add_channel_admin(
@@ -698,9 +708,12 @@ async def orm_add_post_media(
     return m
 
 
-async def orm_delete_post_media(session: AsyncSession, *, media_id: int) -> None:
-    await session.execute(delete(PostMedia).where(PostMedia.id == media_id))
-    await session.flush()
+async def orm_delete_post_media(session: AsyncSession, post_id: int):
+    """Удаляет все медиа из поста."""
+    from database.models import PostMedia
+    await session.execute(
+        delete(PostMedia).where(PostMedia.post_id == post_id)
+    )
 
 
 async def orm_clear_post_media(session: AsyncSession, *, post_id: int) -> None:
@@ -1384,6 +1397,8 @@ async def orm_create_post_from_message(
         author_id=user_id,
         text=text,
         created_at=datetime.utcnow(),
+        source_chat_id=message.chat.id,
+        source_message_id=message.message_id,
     )
     session.add(post)
     await session.flush()
@@ -1429,11 +1444,14 @@ async def orm_create_post_from_album(
         if msg.caption:
             text = msg.caption
             break
+    first_msg = messages[0] if messages else None
 
     post = Post(
         author_id=user_id,
         text=text,
         created_at=datetime.utcnow(),
+        source_chat_id=first_msg.chat.id if first_msg else None,  # <-- ДОБАВИТЬ
+        source_message_id=first_msg.message_id if first_msg else None,
     )
     session.add(post)
     await session.flush()

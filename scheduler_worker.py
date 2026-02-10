@@ -84,6 +84,33 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
     Возвращает список message_id отправленных сообщений (для альбома их несколько).
     """
     post = t_full.post
+    if post.is_repost and post.source_chat_id and post.source_message_id:
+        try:
+            msg = await bot.forward_message(
+                chat_id=t_full.channel_id,
+                from_chat_id=post.source_chat_id,
+                message_id=post.source_message_id,
+                disable_notification=bool(post.silent),
+                protect_content=bool(post.protected),
+            )
+
+
+            # Закрепление
+            if bool(post.pinned):
+                try:
+                    await bot.pin_chat_message(
+                        chat_id=t_full.channel_id,
+                        message_id=msg.message_id,
+                        disable_notification=True,
+                    )
+                except TelegramBadRequest:
+                    pass
+
+            return [msg.message_id]
+
+        except TelegramBadRequest as e:
+            print(f"[REPOST] Forward failed: {e}, using normal send")
+
     kb = _build_post_kb(post)
 
     text = post.text or ""

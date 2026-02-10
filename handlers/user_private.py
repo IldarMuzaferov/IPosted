@@ -16,7 +16,7 @@ from database.orm_query import orm_get_user_channels, orm_get_free_channels_for_
     orm_get_user_folders, orm_add_channel_admin, orm_upsert_channel, orm_upsert_user, orm_create_post_from_message, \
     orm_edit_post_text, orm_add_media_to_post, orm_get_post_full, orm_set_target_autodelete, orm_publish_target_now, \
     orm_log_post_event, orm_schedule_target, orm_set_post_flags, orm_set_reply_target_forwarded, orm_get_user, \
-    orm_get_channels_without_folder
+    orm_get_channels_without_folder, orm_delete_post_media
 from filters.chat_types import ChatTypeFilter
 from handlers.comments_blocker import show_comments_warning_if_needed
 from kbds.callbacks import CreatePostCD, CreatePostStates, ConnectChannelStates, EditTextStates, AttachMediaStates, \
@@ -60,8 +60,8 @@ START_TEXT = (
 )
 
 NO_CHANNELS_TEXT = (
-    "У вас пока нет подключенных каналов.\n\n"
-    "Чтобы подключить первый канал:\n\n"
+    "➕ ДОБАВЛЕНИЕ КАНАЛА\n\n"
+    "Чтобы подключить канал:\n\n"
     "1. Сделайте @IPostedBot администратором канала, дав следующие права:\n\n"
     "✅ Отправка сообщений\n"
     "✅ Удаление сообщений\n"
@@ -428,7 +428,8 @@ async def _check_bot_rights(bot: Bot, channel_id: int) -> Tuple[bool, str, list[
         member = await bot.get_chat_member(channel_id, me.id)
     except TelegramBadRequest:
         return False, "Не удалось получить статус бота в канале.", []
-
+    print(f"[DEBUG] member: {member}")
+    print(f"[DEBUG] status: {member.status}")
     status = getattr(member, "status", None)
     if status not in ("administrator", "creator"):
         return False, "Бот не является администратором канала.", []
@@ -508,6 +509,21 @@ async def connect_channel_message(message: types.Message, state: FSMContext, ses
         )
         return
 
+    try:
+        user_member = await bot.get_chat_member(channel_id, message.from_user.id)
+        if user_member.status not in ("creator", "administrator"):
+            await message.answer(
+                "❌ Вы не являетесь администратором этого канала.\n\n"
+                "Только администраторы канала могут подключать его к боту."
+            )
+            return
+    except Exception:
+        await message.answer(
+            "❌ Не удалось проверить ваши права в канале.\n"
+            "Убедитесь, что вы администратор канала."
+        )
+        return
+
     # Продолжаем с возможными предупреждениями
     warning_text = ""
     if warnings:
@@ -517,6 +533,8 @@ async def connect_channel_message(message: types.Message, state: FSMContext, ses
     ch_username = getattr(chat, "username", None)
     ch_title = getattr(chat, "title", "Канал")
     is_private = False if ch_username else True
+    linked_chat_id = getattr(chat, "linked_chat_id", None)
+
 
     # upsert channel
     await orm_upsert_channel(
@@ -525,6 +543,7 @@ async def connect_channel_message(message: types.Message, state: FSMContext, ses
         title=ch_title,
         username=ch_username,
         is_private=is_private,
+        linked_chat_id=linked_chat_id,
     )
     await orm_upsert_user(
         session,
@@ -547,11 +566,16 @@ async def connect_channel_message(message: types.Message, state: FSMContext, ses
     url = _chat_url(chat)
     await state.clear()
 
+    comments_warning = ""
+    if linked_chat_id:
+        comments_warning = "\\n\\n💬 Для блокировки комментариев бот должен быть админом в чате обсуждения."
+
     await message.answer(
-        connected_text(ch_title, url),
+        connected_text(ch_title, url) + warning_text + comments_warning,
         reply_markup=ik_after_channel_connected(),
         disable_web_page_preview=True,
     )
+
 
 ALBUM_WAIT_SECONDS = 1.0
 #Кнопки редактирования. Пользователь присалал сообщение.
@@ -713,6 +737,15 @@ async def editor_toggle(call: types.CallbackQuery, callback_data: EditorCD, stat
         await call.answer("Реакции " + ("включены" if new_value else "отключены"))
     elif key == "bell":
         await call.answer("Пост выйдет " + ("с уведомлением" if new_value else "без уведомления"))
+    elif key == "repost":
+        if new_value:
+            await call.answer(
+                "📢 Репост включён.\\n"
+                "Пост будет переслан от вашего имени.",
+                show_alert=True
+            )
+        else:
+            await call.answer("Репост выключен")
     else:
         await call.answer()
 
@@ -1624,6 +1657,7 @@ async def editor_continue(call: types.CallbackQuery, callback_data: EditorCD, st
         protected=st.content_protect,
         reactions_enabled=st.reactions,
         comments_enabled=st.comments,
+        is_repost=st.repost,
     )
 
     # ========== Сохраняем reply_target если включен ответный пост ==========
@@ -2791,8 +2825,16 @@ async def reply_post_content_plan(call: types.CallbackQuery, callback_data: Repl
 @user_private_router.message(F.text == "Настройки")
 async def settings_reply_button(message: types.Message, state: FSMContext, session: AsyncSession):
     await state.clear()
-    user = await orm_get_user(session, user_id=message.from_user.id)
+    from database.orm_query import orm_upsert_user
+    user = await orm_upsert_user(
+        session,
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+    )
     user_tz = user.timezone if user else "Europe/Moscow"
+
+    await session.commit()
 
     await message.answer(
         "⚙️ <b>НАСТРОЙКИ</b>\n\n"
@@ -3137,3 +3179,72 @@ async def update_all_channels_linked_chat(bot, session_maker):
 
         await session.commit()
         print("Done!")
+
+
+@user_private_router.callback_query(EditorCD.filter(F.action == "detach_media"))
+async def editor_detach_media(call: types.CallbackQuery, callback_data: EditorCD, state: FSMContext,
+                              session: AsyncSession):
+    """Открепить медиа - удаляет медиа из поста."""
+    data = await state.get_data()
+    if "editor" not in data:
+        await call.answer("Редактор не активен", show_alert=True)
+        return
+
+    st = editor_state_from_dict(data["editor"])
+    post_id = callback_data.post_id
+
+    if int(post_id) != st.post_id:
+        await call.answer("Устаревшая кнопка", show_alert=True)
+        return
+
+    # Удаляем медиа из БД
+    await orm_delete_post_media(session, post_id=post_id)
+    await session.commit()
+
+    # Получаем текст поста
+    post = await orm_get_post_full(session, post_id=post_id)
+    post_text = post.text if post else ""
+
+    # Удаляем старое превью (с медиа)
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+    # Отправляем новое превью (только текст)
+    new_preview = await call.message.answer(post_text or "​")
+
+    # Обновляем EditorState
+    st.preview_message_id = new_preview.message_id
+
+    # Обновляем контекст - теперь нет медиа
+    ctx = EditorContext(
+        kind="text",
+        has_media=False,
+        has_text=bool(post_text),
+        text_was_initial=True,
+        text_added_later=False,
+    )
+
+    await state.update_data(
+        editor=editor_state_to_dict(st),
+        editor_context=editor_ctx_to_dict(ctx),
+    )
+
+    # Строим новую клавиатуру (теперь будет "Прикрепить медиа")
+    editor_kb = build_editor_kb(post_id, st, ctx=ctx)
+
+    # Проверяем URL-кнопки
+    existing_buttons = await orm_get_post_buttons(session, post_id=post_id)
+    if existing_buttons:
+        combined_kb = merge_url_and_editor_kb(existing_buttons, editor_kb)
+    else:
+        combined_kb = editor_kb
+
+    await call.bot.edit_message_reply_markup(
+        chat_id=call.message.chat.id,
+        message_id=new_preview.message_id,
+        reply_markup=combined_kb,
+    )
+
+    await call.answer("✅ Медиа откреплено")
