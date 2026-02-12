@@ -90,7 +90,24 @@ class EditPublishCD(CallbackData, prefix="editpub"):
     action: str  # now | schedule | back
 
 
+class SchedulePostCD(CallbackData, prefix="sched"):
+    """CallbackData для планирования поста."""
+    action: str  # day_prev, day_next, day_select, calendar, month_prev, month_next, select_day, delete, confirm_yes, confirm_no, back, collapse, back_to_time
+    post_id: int = 0
+    year: int = 0
+    month: int = 0
+    day: int = 0
+    value: str = ""  # для delete_after
+
+
 #======================================================================================
+
+class SchedulePostStates(StatesGroup):
+    """Состояния планирования поста."""
+    selecting_date = State()      # Выбор даты
+    entering_time = State()       # Ввод времени
+    selecting_delete = State()    # Выбор времени удаления
+    confirming = State()
 class SettingsStates(StatesGroup):
     waiting_channel_from_settings = State()
     waiting_folder_name = State()

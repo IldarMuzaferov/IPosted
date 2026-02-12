@@ -57,7 +57,7 @@ class EditorState:
 
     # toggles
     hidden: bool = False
-    bell: bool = False  # 🔔/🔕 - уведомление при отправке
+    bell: bool = True  # 🔔/🔕 - уведомление при отправке
     reactions: bool = True  # По умолчанию реакции включены
     content_protect: bool = False  # Защита контента (антикопирование)
     comments: bool = True
@@ -166,11 +166,13 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: 'EditorContext') -> Inli
             callback_data=EditorCD(action="toggle", post_id=post_id, key="bell").pack()
         ),
     ])
-    reaction_text = "✅ Реакции" if st.has_reactions else " Реакции"
-    kb.append([types.InlineKeyboardButton(
-        text=reaction_text,
-        callback_data=EditorCD(action="reactions", post_id=post_id).pack()
-    )])
+    reaction_text = "✅ Реакции" if st.has_reactions else "Реакции"
+    kb.append([
+        InlineKeyboardButton(
+            text=reaction_text,
+            callback_data=EditorCD(action="reactions", post_id=post_id).pack()
+        ),
+    ])
 
     # URL-Кнопки
     url_btn_text = "✅ URL-Кнопки" if st.has_url_buttons else "URL-Кнопки"
@@ -234,6 +236,13 @@ def build_editor_kb(post_id: int, st: EditorState, ctx: 'EditorContext') -> Inli
                 callback_data=EditorCD(action="copy_to_channels", post_id=post_id).pack()
             ),
         ])
+
+    kb.append([
+        InlineKeyboardButton(
+            text="❌ Отменить",
+            callback_data=EditorCD(action="cancel", post_id=post_id).pack()
+        ),
+    ])
 
     # Продолжить
     kb.append([
@@ -425,6 +434,7 @@ def editor_state_to_dict(st: EditorState) -> dict:
         "reply_post": st.reply_post,
         "has_url_buttons": st.has_url_buttons,
         "has_hidden_part": st.has_hidden_part,
+        "has_reactions": st.has_reactions,
         "text_position": st.text_position,
         "reply_to_channel_id": st.reply_to_channel_id,
         "reply_to_message_id": st.reply_to_message_id,
@@ -438,7 +448,7 @@ def editor_state_from_dict(d: dict) -> EditorState:
         preview_chat_id=int(d["preview_chat_id"]),
         preview_message_id=int(d["preview_message_id"]),
         hidden=bool(d.get("hidden", False)),
-        bell=bool(d.get("bell", False)),
+        bell=bool(d.get("bell", True)),
         reactions=bool(d.get("reactions", True)),
         content_protect=bool(d.get("content_protect", False)),
         comments=bool(d.get("comments", True)),
@@ -448,6 +458,7 @@ def editor_state_from_dict(d: dict) -> EditorState:
         reply_post=bool(d.get("reply_post", False)),
         has_url_buttons=bool(d.get("has_url_buttons", False)),
         has_hidden_part=bool(d.get("has_hidden_part", False)),
+        has_reactions=bool(d.get("has_reactions", False)),
         text_position=d.get("text_position", "bottom"),
         reply_to_channel_id = d.get("reply_to_channel_id"),
         reply_to_message_id = d.get("reply_to_message_id"),

@@ -4,7 +4,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from kbds.callbacks import CreatePostCD, PublishCD, NavCD, TIMEZONES, SettingsCD, TimezoneCD, FolderChannelsCD, \
     FolderEditCD, FoldersCD, ContentPlanCD, ContentPlanCalendarCD, ContentPlanDayCD, format_date_short, \
     ContentPlanPostCD, MONTH_NAMES, WEEKDAY_NAMES, format_date_medium, EditPostCD, EditTimerCD, EditPublishCD
-from kbds.post_editor import EditTextCD
+from kbds.post_editor import EditTextCD, EditorCD
 from datetime import datetime, timezone, timedelta, date
 from zoneinfo import ZoneInfo
 import calendar
@@ -1210,5 +1210,284 @@ def build_back_to_edit_kb() -> InlineKeyboardMarkup:
             text="⬅️ Назад",
             callback_data=EditPublishCD(action="back").pack()
         )],
+    ])
+
+def build_reactions_setup_kb(post_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура при настройке реакций."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗑 Очистить реакции", callback_data=EditorCD(action="clear_reactions", post_id=post_id).pack())],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=EditorCD(action="reactions_back", post_id=post_id).pack())],
+    ])
+#============================================================================
+WEEKDAY_NAMES_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+WEEKDAY_NAMES_FULL = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+
+MONTH_NAMES_SHORT = {
+    1: "янв", 2: "фев", 3: "мар", 4: "апр", 5: "май", 6: "июн",
+    7: "июл", 8: "авг", 9: "сен", 10: "окт", 11: "ноя", 12: "дек"
+}
+
+MONTH_NAMES_GENITIVE = {
+    1: "января", 2: "февраля", 3: "марта", 4: "апреля", 5: "мая", 6: "июня",
+    7: "июля", 8: "августа", 9: "сентября", 10: "октября", 11: "ноября", 12: "декабря"
+}
+
+
+# === ФУНКЦИИ ДЛЯ ПЛАНИРОВАНИЯ ===
+
+def format_date_short_weekday(d: date) -> str:
+    """Форматирует дату как 'Ср, 11 фев'"""
+    weekday = WEEKDAY_NAMES_SHORT[d.weekday()]
+    month = MONTH_NAMES_SHORT[d.month]
+    return f"{weekday}, {d.day} {month}"
+
+
+def build_schedule_day_selector_kb(
+        post_id: int,
+        current_date: date,
+        selected_date: date | None = None,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура выбора даты с пагинацией по дням.
+
+    <- Ср, 11 фев    Чт, 12 фев    Пт, 13 фев ->
+               Развернуть календарь
+                     Назад
+    """
+    from kbds.callbacks import SchedulePostCD
+
+    kb = []
+
+    # Пагинация по дням (показываем 3 дня)
+    prev_date = current_date - timedelta(days=1)
+    next_date = current_date + timedelta(days=1)
+
+    # Определяем какая дата выбрана (ромбик)
+    def get_day_text(d: date, is_center: bool = False) -> str:
+        text = format_date_short_weekday(d)
+        if selected_date and d == selected_date:
+            return f"◆ {text}"
+        return text
+
+    kb.append([
+        InlineKeyboardButton(
+            text=f"← {format_date_short_weekday(prev_date)}",
+            callback_data=SchedulePostCD(
+                action="day_prev",
+                post_id=post_id,
+                year=prev_date.year,
+                month=prev_date.month,
+                day=prev_date.day
+            ).pack()
+        ),
+        InlineKeyboardButton(
+            text=get_day_text(current_date, True),
+            callback_data=SchedulePostCD(
+                action="day_select",
+                post_id=post_id,
+                year=current_date.year,
+                month=current_date.month,
+                day=current_date.day
+            ).pack()
+        ),
+        InlineKeyboardButton(
+            text=f"{format_date_short_weekday(next_date)} →",
+            callback_data=SchedulePostCD(
+                action="day_next",
+                post_id=post_id,
+                year=next_date.year,
+                month=next_date.month,
+                day=next_date.day
+            ).pack()
+        ),
+    ])
+
+    # Развернуть календарь
+    kb.append([InlineKeyboardButton(
+        text="📅 Развернуть календарь",
+        callback_data=SchedulePostCD(
+            action="calendar",
+            post_id=post_id,
+            year=current_date.year,
+            month=current_date.month
+        ).pack()
+    )])
+
+    # Назад
+    kb.append([InlineKeyboardButton(
+        text="⬅️ Назад",
+        callback_data=SchedulePostCD(action="back", post_id=post_id).pack()
+    )])
+
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def build_schedule_calendar_kb(
+        post_id: int,
+        year: int,
+        month: int,
+        selected_date: date | None = None,
+) -> InlineKeyboardMarkup:
+    """
+    Развёрнутый календарь для выбора даты.
+    """
+    from kbds.callbacks import SchedulePostCD
+
+    kb = []
+
+    # Пагинация по месяцам
+    if month == 1:
+        prev_month, prev_year = 12, year - 1
+    else:
+        prev_month, prev_year = month - 1, year
+
+    if month == 12:
+        next_month, next_year = 1, year + 1
+    else:
+        next_month, next_year = month + 1, year
+
+    kb.append([
+        InlineKeyboardButton(
+            text=f"← {MONTH_NAMES_SHORT[prev_month]}",
+            callback_data=SchedulePostCD(
+                action="month_prev",
+                post_id=post_id,
+                year=prev_year,
+                month=prev_month
+            ).pack()
+        ),
+        InlineKeyboardButton(
+            text=f"{MONTH_NAMES[month]} {year}",
+            callback_data="ignore"
+        ),
+        InlineKeyboardButton(
+            text=f"{MONTH_NAMES_SHORT[next_month]} →",
+            callback_data=SchedulePostCD(
+                action="month_next",
+                post_id=post_id,
+                year=next_year,
+                month=next_month
+            ).pack()
+        ),
+    ])
+
+    # Заголовок дней недели
+    kb.append([
+        InlineKeyboardButton(text=day, callback_data="ignore")
+        for day in WEEKDAY_NAMES_SHORT
+    ])
+
+    # Календарь
+    cal = calendar.Calendar(firstweekday=0)
+    month_days = cal.monthdayscalendar(year, month)
+
+    for week in month_days:
+        row = []
+        for day_num in week:
+            if day_num == 0:
+                row.append(InlineKeyboardButton(text=" ", callback_data="ignore"))
+            else:
+                d = date(year, month, day_num)
+
+                # Ромбик для выбранной даты
+                if selected_date and d == selected_date:
+                    text = f"◆{day_num}"
+                else:
+                    text = str(day_num)
+
+                row.append(InlineKeyboardButton(
+                    text=text,
+                    callback_data=SchedulePostCD(
+                        action="select_day",
+                        post_id=post_id,
+                        year=year,
+                        month=month,
+                        day=day_num
+                    ).pack()
+                ))
+        kb.append(row)
+
+    # Свернуть календарь
+    today = date.today()
+    kb.append([InlineKeyboardButton(
+        text="⬅️ Свернуть календарь",
+        callback_data=SchedulePostCD(
+            action="collapse",
+            post_id=post_id,
+            year=today.year,
+            month=today.month,
+            day=today.day
+        ).pack()
+    )])
+
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def build_schedule_delete_after_kb(
+        post_id: int,
+        selected_value: str | None = None,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура выбора времени автоудаления с галочкой.
+    """
+    from kbds.callbacks import SchedulePostCD
+
+    options = [
+        ("1h", "1 час"),
+        ("6h", "6 часов"),
+        ("12h", "12 часов"),
+        ("24h", "24 часа"),
+        ("48h", "48 часов"),
+        ("3d", "3 дня"),
+        ("7d", "7 дней"),
+        ("none", "Не удалять"),
+    ]
+
+    kb = []
+    row = []
+
+    for val, label in options:
+        # Галочка если выбрано
+        if selected_value == val:
+            text = f"✅ {label}"
+        else:
+            text = label
+
+        row.append(InlineKeyboardButton(
+            text=text,
+            callback_data=SchedulePostCD(action="delete", post_id=post_id, value=val).pack()
+        ))
+
+        if len(row) == 2:
+            kb.append(row)
+            row = []
+
+    if row:
+        kb.append(row)
+
+    # Назад
+    kb.append([InlineKeyboardButton(
+        text="⬅️ Назад",
+        callback_data=SchedulePostCD(action="back_to_time", post_id=post_id).pack()
+    )])
+
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def build_schedule_confirm_kb(post_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура подтверждения планирования."""
+    from kbds.callbacks import SchedulePostCD
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Да",
+                callback_data=SchedulePostCD(action="confirm_yes", post_id=post_id).pack()
+            ),
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=SchedulePostCD(action="confirm_no", post_id=post_id).pack()
+            ),
+        ]
     ])
 

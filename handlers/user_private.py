@@ -1,7 +1,7 @@
 import asyncio
 import re
 from typing import Optional, Tuple
-from datetime import timezone
+from datetime import timezone, date
 from aiogram import F, types, Router, Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart, StateFilter
@@ -11,7 +11,7 @@ from aiogram.types import Message, ContentType, ReplyKeyboardMarkup, KeyboardBut
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.orm import selectinload
 
-from database.models import TgMemberStatus, PostEventType
+from database.models import TgMemberStatus, PostEventType, TargetState, PostTarget
 from database.orm_query import orm_get_user_channels, orm_get_free_channels_for_user, orm_get_folder_channels, \
     orm_get_user_folders, orm_add_channel_admin, orm_upsert_channel, orm_upsert_user, orm_create_post_from_message, \
     orm_edit_post_text, orm_add_media_to_post, orm_get_post_full, orm_set_target_autodelete, orm_publish_target_now, \
@@ -20,11 +20,14 @@ from database.orm_query import orm_get_user_channels, orm_get_free_channels_for_
 from filters.chat_types import ChatTypeFilter
 from handlers.comments_blocker import show_comments_warning_if_needed
 from kbds.callbacks import CreatePostCD, CreatePostStates, ConnectChannelStates, EditTextStates, AttachMediaStates, \
-    UrlButtonsStates, PublishStates, PublishCD, ReactionCD, ReactionStates
+    UrlButtonsStates, PublishStates, PublishCD, ReactionCD, ReactionStates, SchedulePostStates, SchedulePostCD, \
+    MONTH_NAMES_GENITIVE, WEEKDAY_NAMES_FULL
 from kbds.inline import ik_create_post_menu, ik_create_root_menu, ik_channels_menu, ik_after_channel_connected, \
     ik_folders_empty, \
     ik_folder_channels, ik_folders_list, ik_edit_text_controls, ik_attach_media_controls, ik_send_mode, ik_delete_after, \
-    ik_confirm_publish, ik_finish_nav, build_settings_main_kb, build_content_plan_main_kb
+    ik_confirm_publish, ik_finish_nav, build_settings_main_kb, build_content_plan_main_kb, build_reactions_setup_kb, \
+    build_schedule_day_selector_kb, build_schedule_delete_after_kb, build_schedule_confirm_kb, \
+    build_schedule_calendar_kb
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime as dt_utc
 from kbds.post_editor import build_copy_channels_kb, EditorContext, editor_ctx_to_dict
@@ -362,18 +365,26 @@ async def cp_pick_free_channel(call: types.CallbackQuery, callback_data: CreateP
 # Хелперы: парсинг входа и проверка прав
 def _extract_channel_id_from_message(message: Message) -> Optional[int]:
     """
-    Пытаемся вытащить канал из:
-    - пересланного сообщения (forward_from_chat)
-    - sender_chat (если пользователь писал от имени канала, редко)
+    Извлекает ID канала из пересланного сообщения.
     """
+    # Способ 1: forward_from_chat (старый API)
     if message.forward_from_chat and message.forward_from_chat.type == "channel":
         return message.forward_from_chat.id
 
-    # aiogram/telegram менялись, поэтому подстрахуемся:
+    # Способ 2: forward_origin (новый API в aiogram 3.x)
     fo = getattr(message, "forward_origin", None)
-    if fo and getattr(fo, "chat", None) and fo.chat.type == "channel":
-        return fo.chat.id
+    if fo:
+        # MessageOriginChannel
+        if hasattr(fo, "chat") and fo.chat and getattr(fo.chat, "type", None) == "channel":
+            return fo.chat.id
+        # Иногда type указывает на тип origin
+        origin_type = getattr(fo, "type", None)
+        if origin_type == "channel":
+            chat = getattr(fo, "chat", None)
+            if chat:
+                return chat.id
 
+    # Способ 3: sender_chat (когда пользователь пишет от имени канала)
     if message.sender_chat and message.sender_chat.type == "channel":
         return message.sender_chat.id
 
@@ -382,29 +393,43 @@ def _extract_channel_id_from_message(message: Message) -> Optional[int]:
 
 def _parse_channel_ref(text: str) -> Optional[str | int]:
     """
-    Возвращает:
-    - int если это похоже на channel_id
-    - str если это username (без @)
+    Парсит ссылку/username/ID канала.
     """
     t = (text or "").strip()
     if not t:
         return None
 
-    # t.me link
-    m = re.search(r"(?:https?://)?t\.me/([A-Za-z0-9_]{5,})", t)
+    # t.me/username или t.me/c/123456789
+    # Форматы: t.me/channel, https://t.me/channel, t.me/c/1234567890/123
+
+    # Приватный канал: t.me/c/1234567890 или t.me/c/1234567890/123
+    m = re.search(r"t\.me/c/(\d+)", t)
     if m:
-        return m.group(1)
+        # Приватные каналы имеют формат -100XXXXXXXXXX
+        return int("-100" + m.group(1))
+
+    # Публичный канал: t.me/username
+    m = re.search(r"(?:https?://)?t\.me/([A-Za-z][A-Za-z0-9_]{3,})", t)
+    if m:
+        username = m.group(1)
+        # Исключаем служебные пути
+        if username.lower() not in ("c", "joinchat", "addstickers", "share"):
+            return username
 
     # @username
-    if t.startswith("@") and len(t) > 1:
+    if t.startswith("@") and len(t) > 4:
         return t[1:]
 
-    # numeric id
+    # Числовой ID (может быть с минусом)
     if re.fullmatch(r"-?\d{5,}", t):
         try:
             return int(t)
         except ValueError:
             return None
+
+    # Просто username без @
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,}", t):
+        return t
 
     return None
 
@@ -471,27 +496,41 @@ async def _check_user_is_admin(bot: Bot, channel_id: int, user_id: int) -> Tuple
 #Пользователь прислал пересланное/id/username -> подключаем
 @user_private_router.message(ConnectChannelStates.waiting_channel)
 async def connect_channel_message(message: types.Message, state: FSMContext, session: AsyncSession, bot):
-    # 1) определить канал
-    channel_id = _extract_channel_id_from_message(message)
-    ref = None
+    """Подключение канала."""
 
+    # === ОТЛАДКА ===
+    print(f"[ADD_CHANNEL] Получено сообщение: {message.text}")
+    print(f"[ADD_CHANNEL] forward_from_chat: {message.forward_from_chat}")
+    print(f"[ADD_CHANNEL] forward_origin: {getattr(message, 'forward_origin', None)}")
+    print(f"[ADD_CHANNEL] sender_chat: {message.sender_chat}")
+    # === КОНЕЦ ОТЛАДКИ ===
+
+    channel_id = _extract_channel_id_from_message(message)
+    print(f"[ADD_CHANNEL] Extracted channel_id: {channel_id}")
+
+    ref = None
     if channel_id is None:
         ref = _parse_channel_ref(message.text or "")
+        print(f"[ADD_CHANNEL] Parsed ref: {ref}")
+
         if ref is None:
-            await message.answer("Не понял. Пришлите пересланное сообщение из канала, юзернейм (@channel) или ID канала.")
+            await message.answer(
+                "Не понял. Пришлите пересланное сообщение из канала, юзернейм (@channel) или ID канала.")
             return
 
-        # resolve username/id -> channel_id
         try:
             chat = await bot.get_chat(ref)
             channel_id = chat.id
-        except Exception:
+            print(f"[ADD_CHANNEL] Resolved channel_id: {channel_id}")
+        except Exception as e:
+            print(f"[ADD_CHANNEL] Error getting chat: {e}")
             await message.answer("Не удалось найти канал. Проверьте юзернейм или ID и попробуйте снова.")
             return
     else:
         try:
             chat = await bot.get_chat(channel_id)
-        except Exception:
+        except Exception as e:
+            print(f"[ADD_CHANNEL] Error getting chat by id: {e}")
             await message.answer("Не удалось получить информацию о канале. Попробуйте ещё раз.")
             return
 
@@ -1230,15 +1269,31 @@ async def editor_copy_to_channels(call: types.CallbackQuery, callback_data: Edit
         copy_selected_ids=set(),
     )
 
-    # Отправляем сообщение с выбором каналов
-    await call.message.edit_text(
-        COPY_POST_TEXT,
-        reply_markup=build_copy_channels_kb(
-            post_id=st.post_id,
-            channels=available_channels,
-            selected_ids=set(),
-        ),
+    kb = build_copy_channels_kb(
+        post_id=st.post_id,
+        channels=available_channels,
+        selected_ids=set(),
     )
+
+    try:
+        await call.message.edit_text(
+            COPY_POST_TEXT,
+            reply_markup=kb,
+        )
+    except TelegramBadRequest as e:
+        error_msg = str(e).lower()
+        if "no text in the message" in error_msg or "there is no text" in error_msg:
+            try:
+                await call.message.delete()
+            except:
+                pass
+            await call.message.answer(
+                COPY_POST_TEXT,
+                reply_markup=kb,
+            )
+        else:
+            raise
+
     await call.answer()
 
 
@@ -1334,7 +1389,7 @@ async def copy_toggle_all(call: types.CallbackQuery, callback_data: CopyPostCD, 
 
 @user_private_router.callback_query(CopyPostCD.filter(F.action == "apply"))
 async def copy_apply(call: types.CallbackQuery, callback_data: CopyPostCD, state: FSMContext, session: AsyncSession):
-    '''Применить копирование - создаём PostTarget для выбранных каналов.'''
+    """Применить копирование."""
     data = await state.get_data()
 
     raw_selected = data.get("copy_selected_ids") or []
@@ -1345,7 +1400,6 @@ async def copy_apply(call: types.CallbackQuery, callback_data: CopyPostCD, state
 
     post_id = callback_data.post_id
 
-    # Создаём копии поста для выбранных каналов
     await orm_copy_post_to_channels(
         session=session,
         post_id=post_id,
@@ -1355,34 +1409,47 @@ async def copy_apply(call: types.CallbackQuery, callback_data: CopyPostCD, state
 
     raw_current = data.get("selected_channel_ids") or []
     current_ids = set(raw_current) if isinstance(raw_current, list) else set(raw_current)
-
     new_ids = current_ids | selected_ids
     await state.update_data(selected_channel_ids=list(new_ids))
 
-
-    # Возвращаемся к редактору
     st = editor_state_from_dict(data["editor"])
     editor_ctx = get_editor_ctx_from_data(data)
     if not editor_ctx:
         editor_ctx = make_ctx_from_message(call.message)
 
-    # Очищаем данные копирования
     await state.update_data(
         copy_post_id=None,
         copy_available_channels=None,
         copy_selected_ids=None,
     )
 
-    await call.message.edit_text(
-        f"✅ Пост будет скопирован в {len(selected_ids)} канал(ов).\\n\\nНастройте пост перед публикацией.",
-        reply_markup=build_editor_kb(post_id, st, ctx=editor_ctx),
-    )
+    # === ИСПРАВЛЕНИЕ: проверяем тип сообщения ===
+    try:
+        # Пробуем edit_text (для текстовых сообщений)
+        await call.message.edit_text(
+            f"✅ Пост будет скопирован в {len(selected_ids)} канал(ов).",
+            reply_markup=build_editor_kb(post_id, st, ctx=editor_ctx),
+        )
+    except TelegramBadRequest as e:
+        if "no text in the message" in str(e).lower() or "message can't be edited" in str(e).lower():
+            # Для сообщений с медиа - удаляем и отправляем новое
+            try:
+                await call.message.delete()
+            except:
+                pass
+            await call.message.answer(
+                f"✅ Пост будет скопирован в {len(selected_ids)} канал(ов).",
+                reply_markup=build_editor_kb(post_id, st, ctx=editor_ctx),
+            )
+        else:
+            raise
+
     await call.answer(f"Добавлено {len(selected_ids)} канал(ов)")
 
 
 @user_private_router.callback_query(CopyPostCD.filter(F.action == "back"))
 async def copy_back(call: types.CallbackQuery, callback_data: CopyPostCD, state: FSMContext):
-    '''Вернуться из меню копирования к редактору.'''
+    """Вернуться из меню копирования к редактору."""
     data = await state.get_data()
 
     st = editor_state_from_dict(data["editor"])
@@ -1390,17 +1457,31 @@ async def copy_back(call: types.CallbackQuery, callback_data: CopyPostCD, state:
     if not editor_ctx:
         editor_ctx = make_ctx_from_message(call.message)
 
-    # Очищаем данные копирования
     await state.update_data(
         copy_post_id=None,
         copy_available_channels=None,
         copy_selected_ids=None,
     )
 
-    await call.message.edit_text(
-        "Настройте пост перед публикацией.",
-        reply_markup=build_editor_kb(callback_data.post_id, st, ctx=editor_ctx),
-    )
+    # === ИСПРАВЛЕНИЕ: проверяем тип сообщения ===
+    try:
+        await call.message.edit_text(
+            "Настройте пост перед публикацией.",
+            reply_markup=build_editor_kb(callback_data.post_id, st, ctx=editor_ctx),
+        )
+    except TelegramBadRequest as e:
+        if "no text in the message" in str(e).lower():
+            try:
+                await call.message.delete()
+            except:
+                pass
+            await call.message.answer(
+                "Настройте пост перед публикацией.",
+                reply_markup=build_editor_kb(callback_data.post_id, st, ctx=editor_ctx),
+            )
+        else:
+            raise
+
     await call.answer()
 
 
@@ -1701,80 +1782,470 @@ async def editor_continue(call: types.CallbackQuery, callback_data: EditorCD, st
     await call.message.answer(text, reply_markup=ik_send_mode(st.post_id, channel_title, channel_url), disable_web_page_preview=True)
     await call.answer()
 
+
 @user_private_router.callback_query(PublishCD.filter(F.action == "later"))
 async def publish_later(call: types.CallbackQuery, callback_data: PublishCD, state: FSMContext, session: AsyncSession):
+    """Кнопка 'Отложить' - показываем пагинацию дней."""
     user = await orm_get_user(session, user_id=call.from_user.id)
     user_tz = user.timezone if user else "Europe/Moscow"
 
-    tz_names = {
-        "Europe/Moscow": "Москва GMT+3",
-        "Europe/Kiev": "Киев GMT+2",
-        "Europe/London": "Лондон GMT+0",
-        "Asia/Almaty": "Алматы GMT+6",
-        "Asia/Vladivostok": "Владивосток GMT+10",
-    }
-    tz_display = tz_names.get(user_tz, user_tz)
+    post_id = int(callback_data.post_id)
+    today = date.today()
+
+    # Получаем данные о канале из FSM
+    data = await state.get_data()
+    channel_title = data.get("publish_channel_title", "канал")
+    channel_url = data.get("publish_channel_url", "")
 
     await state.update_data(
-        publish_post_id=int(callback_data.post_id),
-        publish_send_mode="later",
-        publish_user_timezone=user_tz,
+        schedule_post_id=post_id,
+        schedule_user_timezone=user_tz,
+        schedule_selected_date=None,
+        schedule_channel_title=channel_title,
+        schedule_channel_url=channel_url,
     )
-    await state.set_state(PublishStates.waiting_datetime)
+    await state.set_state(SchedulePostStates.selecting_date)
 
     await call.message.answer(
-        f"Введите время размещения в вашем часовом поясе ({tz_display}).\\n"
-        f"Сменить часовой пояс можно в настройках.\\n\\n"
-        f"Например: 18:01 16.8.2025"
+        get_schedule_text(user_tz),
+        parse_mode="HTML",
+        reply_markup=build_schedule_day_selector_kb(post_id, today),
     )
     await call.answer()
 
-def _parse_user_dt(text: str) -> datetime | None:
-    """
-    Поддержка: HH:MM D.M.YYYY (день/месяц могут быть 1-2 цифры)
-    """
-    import re
-    t = (text or "").strip()
-    m = re.fullmatch(r"(\d{1,2}):(\d{2})\s+(\d{1,2})\.(\d{1,2})\.(\d{4})", t)
-    if not m:
-        return None
-    hh, mm, dd, mo, yy = map(int, m.groups())
-    if not (0 <= hh <= 23 and 0 <= mm <= 59):
-        return None
-    try:
-        return datetime(yy, mo, dd, hh, mm)
-    except ValueError:
-        return None
 
-@user_private_router.message(StateFilter(PublishStates.waiting_datetime), F.text)
-async def publish_receive_datetime(message: types.Message, state: FSMContext):
-    user_dt = _parse_user_dt(message.text)
-    if not user_dt:
-        await message.answer("Неверный формат. Пример: 18:01 16.8.2020")
-        return
+@user_private_router.callback_query(SchedulePostCD.filter(F.action == "day_prev"))
+async def schedule_day_prev(call: types.CallbackQuery, callback_data: SchedulePostCD, state: FSMContext):
+    """Навигация на предыдущий день."""
+    new_date = date(callback_data.year, callback_data.month, callback_data.day)
 
     data = await state.get_data()
-    user_tz_name = data.get("publish_user_timezone", "Europe/Moscow")
+    selected_date = data.get("schedule_selected_date")
+    if selected_date:
+        selected_date = date.fromisoformat(selected_date)
 
-    # Конвертируем локальное время в UTC для scheduler
+    user_tz = data.get("schedule_user_timezone", "Europe/Moscow")
+
     try:
+        await call.message.edit_text(
+            get_schedule_text(user_tz),
+            parse_mode="HTML",
+            reply_markup=build_schedule_day_selector_kb(
+                callback_data.post_id, new_date, selected_date
+            ),
+        )
+    except TelegramBadRequest:
+        pass
+    await call.answer()
+
+
+@user_private_router.callback_query(SchedulePostCD.filter(F.action == "day_next"))
+async def schedule_day_next(call: types.CallbackQuery, callback_data: SchedulePostCD, state: FSMContext):
+    """Навигация на следующий день."""
+    new_date = date(callback_data.year, callback_data.month, callback_data.day)
+
+    data = await state.get_data()
+    selected_date = data.get("schedule_selected_date")
+    if selected_date:
+        selected_date = date.fromisoformat(selected_date)
+
+    user_tz = data.get("schedule_user_timezone", "Europe/Moscow")
+
+    try:
+        await call.message.edit_text(
+            get_schedule_text(user_tz),
+            parse_mode="HTML",
+            reply_markup=build_schedule_day_selector_kb(
+                callback_data.post_id, new_date, selected_date
+            ),
+        )
+    except TelegramBadRequest:
+        pass
+    await call.answer()
+
+
+@user_private_router.callback_query(SchedulePostCD.filter(F.action == "day_select"))
+async def schedule_day_select(call: types.CallbackQuery, callback_data: SchedulePostCD, state: FSMContext):
+    """Выбор даты из пагинации (центральная кнопка)."""
+    selected = date(callback_data.year, callback_data.month, callback_data.day)
+
+    await state.update_data(schedule_selected_date=selected.isoformat())
+    await state.set_state(SchedulePostStates.entering_time)
+
+    # Обновляем клавиатуру с ромбиком на выбранной дате
+    try:
+        await call.message.edit_reply_markup(
+            reply_markup=build_schedule_day_selector_kb(
+                callback_data.post_id, selected, selected
+            ),
+        )
+    except TelegramBadRequest:
+        pass
+
+    await call.answer(f"Выбрано: {selected.strftime('%d.%m.%Y')}. Введите время.")
+
+
+@user_private_router.callback_query(SchedulePostCD.filter(F.action == "calendar"))
+async def schedule_show_calendar(call: types.CallbackQuery, callback_data: SchedulePostCD, state: FSMContext):
+    """Развернуть календарь."""
+    data = await state.get_data()
+    selected_date = data.get("schedule_selected_date")
+    if selected_date:
+        selected_date = date.fromisoformat(selected_date)
+
+    user_tz = data.get("schedule_user_timezone", "Europe/Moscow")
+
+    try:
+        await call.message.edit_text(
+            get_schedule_text(user_tz),
+            parse_mode="HTML",
+            reply_markup=build_schedule_calendar_kb(
+                callback_data.post_id,
+                callback_data.year,
+                callback_data.month,
+                selected_date,
+            ),
+        )
+    except TelegramBadRequest:
+        pass
+    await call.answer()
+
+
+@user_private_router.callback_query(SchedulePostCD.filter(F.action == "month_prev"))
+async def schedule_month_prev(call: types.CallbackQuery, callback_data: SchedulePostCD, state: FSMContext):
+    """Навигация на предыдущий месяц."""
+    data = await state.get_data()
+    selected_date = data.get("schedule_selected_date")
+    if selected_date:
+        selected_date = date.fromisoformat(selected_date)
+
+    user_tz = data.get("schedule_user_timezone", "Europe/Moscow")
+
+    try:
+        await call.message.edit_text(
+            get_schedule_text(user_tz),
+            parse_mode="HTML",
+            reply_markup=build_schedule_calendar_kb(
+                callback_data.post_id,
+                callback_data.year,
+                callback_data.month,
+                selected_date,
+            ),
+        )
+    except TelegramBadRequest:
+        pass
+    await call.answer()
+
+
+@user_private_router.callback_query(SchedulePostCD.filter(F.action == "month_next"))
+async def schedule_month_next(call: types.CallbackQuery, callback_data: SchedulePostCD, state: FSMContext):
+    """Навигация на следующий месяц."""
+    data = await state.get_data()
+    selected_date = data.get("schedule_selected_date")
+    if selected_date:
+        selected_date = date.fromisoformat(selected_date)
+
+    user_tz = data.get("schedule_user_timezone", "Europe/Moscow")
+
+    try:
+        await call.message.edit_text(
+            get_schedule_text(user_tz),
+            parse_mode="HTML",
+            reply_markup=build_schedule_calendar_kb(
+                callback_data.post_id,
+                callback_data.year,
+                callback_data.month,
+                selected_date,
+            ),
+        )
+    except TelegramBadRequest:
+        pass
+    await call.answer()
+
+
+@user_private_router.callback_query(SchedulePostCD.filter(F.action == "select_day"))
+async def schedule_calendar_select_day(call: types.CallbackQuery, callback_data: SchedulePostCD, state: FSMContext):
+    """Выбор даты из календаря."""
+    selected = date(callback_data.year, callback_data.month, callback_data.day)
+
+    await state.update_data(schedule_selected_date=selected.isoformat())
+    await state.set_state(SchedulePostStates.entering_time)
+
+    data = await state.get_data()
+    user_tz = data.get("schedule_user_timezone", "Europe/Moscow")
+
+    # Обновляем календарь с ромбиком на выбранной дате
+    try:
+        await call.message.edit_text(
+            get_schedule_text(user_tz),
+            parse_mode="HTML",
+            reply_markup=build_schedule_calendar_kb(
+                callback_data.post_id,
+                callback_data.year,
+                callback_data.month,
+                selected,
+            ),
+        )
+    except TelegramBadRequest:
+        pass
+
+    await call.answer(f"Выбрано: {selected.strftime('%d.%m.%Y')}. Введите время.")
+
+
+@user_private_router.callback_query(SchedulePostCD.filter(F.action == "collapse"))
+async def schedule_collapse_calendar(call: types.CallbackQuery, callback_data: SchedulePostCD, state: FSMContext):
+    """Свернуть календарь обратно в пагинацию дней."""
+    data = await state.get_data()
+    selected_date = data.get("schedule_selected_date")
+    if selected_date:
+        selected_date = date.fromisoformat(selected_date)
+
+    current = date(callback_data.year, callback_data.month, callback_data.day)
+    user_tz = data.get("schedule_user_timezone", "Europe/Moscow")
+
+    try:
+        await call.message.edit_text(
+            get_schedule_text(user_tz),
+            parse_mode="HTML",
+            reply_markup=build_schedule_day_selector_kb(
+                callback_data.post_id, current, selected_date
+            ),
+        )
+    except TelegramBadRequest:
+        pass
+    await call.answer()
+
+
+@user_private_router.message(StateFilter(SchedulePostStates.selecting_date), F.text)
+@user_private_router.message(StateFilter(SchedulePostStates.entering_time), F.text)
+async def schedule_receive_time(message: types.Message, state: FSMContext, session: AsyncSession):
+    """Получение времени от пользователя."""
+    data = await state.get_data()
+
+    # Определяем дату по умолчанию
+    default_date_str = data.get("schedule_selected_date")
+    if default_date_str:
+        default_date = date.fromisoformat(default_date_str)
+    else:
+        default_date = date.today()
+
+    # Парсим введённое время/дату
+    result = parse_datetime_flexible(message.text, default_date)
+
+    if not result:
+        await message.answer(
+            "❌ Неверный формат. Примеры:\n"
+            "<code>18:30</code> или <code>1830</code> или <code>18:30 15.02</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    selected_date, hh, mm = result
+
+    # Конвертируем локальное время в UTC
+    user_tz_name = data.get("schedule_user_timezone", "Europe/Moscow")
+
+    try:
+        from zoneinfo import ZoneInfo
         user_tz = ZoneInfo(user_tz_name)
-        local_dt = user_dt.replace(tzinfo=user_tz)
+        local_dt = datetime(selected_date.year, selected_date.month, selected_date.day, hh, mm, tzinfo=user_tz)
         utc_dt = local_dt.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
-    except Exception:
-        utc_dt = user_dt
+        print(f"Конвертация OK: local={local_dt}, utc={utc_dt}")
+    except Exception as e:
+        print(f"ОШИБКА КОНВЕРТАЦИИ: {e}")  # ← Что тут выводит?
+        utc_dt = datetime(selected_date.year, selected_date.month, selected_date.day, hh, mm)
+        local_dt = utc_dt
 
+    # Сохраняем в FSM
     await state.update_data(
-        publish_scheduled_dt=utc_dt.isoformat(),
-        publish_display_dt=user_dt.isoformat(),
+        schedule_selected_date=selected_date.isoformat(),
+        schedule_time_hh=hh,
+        schedule_time_mm=mm,
+        schedule_utc_dt=utc_dt.isoformat(),
+        schedule_local_dt=local_dt.replace(tzinfo=None).isoformat(),
     )
-    await state.set_state(PublishStates.choosing_delete_after)
+    await state.set_state(SchedulePostStates.selecting_delete)
 
-    post_id = int(data.get("publish_post_id"))
+    post_id = data.get("schedule_post_id")
+    print(f"user_tz_name = {user_tz_name}")
+    print(f"local_dt = {local_dt}")
+    print(f"utc_dt = {utc_dt}")
+
     await message.answer(
-        "Вы можете установить через какое время после выхода поста, он будет удалён.",
-        reply_markup=ik_delete_after(post_id),
+        "⏱ <b>АВТОУДАЛЕНИЕ</b>\n\n"
+        "Выберите через какое время после выхода пост будет удалён:",
+        parse_mode="HTML",
+        reply_markup=build_schedule_delete_after_kb(post_id),
     )
+
+
+@user_private_router.callback_query(SchedulePostCD.filter(F.action == "delete"))
+async def schedule_select_delete(call: types.CallbackQuery, callback_data: SchedulePostCD, state: FSMContext):
+    """Выбор времени автоудаления."""
+    await state.update_data(schedule_delete_after=callback_data.value)
+
+    # Обновляем клавиатуру с галочкой на выбранном варианте
+    try:
+        await call.message.edit_reply_markup(
+            reply_markup=build_schedule_delete_after_kb(callback_data.post_id, callback_data.value),
+        )
+    except TelegramBadRequest:
+        pass
+
+    # Переходим к подтверждению
+    await state.set_state(SchedulePostStates.confirming)
+
+    data = await state.get_data()
+    local_dt = datetime.fromisoformat(data.get("schedule_local_dt"))
+    channel_title = data.get("schedule_channel_title", "канал")
+    channel_url = data.get("schedule_channel_url", "")
+
+    # Форматируем дату красиво
+    weekday = WEEKDAY_NAMES_FULL[local_dt.weekday()]
+    month = MONTH_NAMES_GENITIVE[local_dt.month]
+    date_str = f"{weekday}, {local_dt.day} {month} {local_dt.year} г."
+    time_str = f"{local_dt.hour:02d}:{local_dt.minute:02d}"
+
+    # Формируем ссылку на канал
+    if channel_url:
+        channel_link = f'<a href="{channel_url}">{channel_title}</a>'
+    else:
+        channel_link = f"<b>{channel_title}</b>"
+
+    await call.message.answer(
+        f"Запланировать пост в канал {channel_link} "
+        f"на {date_str} в {time_str}?",
+        parse_mode="HTML",
+        reply_markup=build_schedule_confirm_kb(callback_data.post_id),
+    )
+    await call.answer()
+
+
+@user_private_router.callback_query(SchedulePostCD.filter(F.action == "confirm_yes"))
+async def schedule_confirm_yes(call: types.CallbackQuery, callback_data: SchedulePostCD, state: FSMContext,
+                               session: AsyncSession):
+    """Подтверждение планирования - создаём или обновляем PostTarget."""
+    data = await state.get_data()
+
+    post_id = data.get("schedule_post_id")
+    utc_dt = datetime.fromisoformat(data.get("schedule_utc_dt"))
+    delete_after = data.get("schedule_delete_after", "none")
+    selected_ids = set(data.get("publish_selected_channel_ids") or [])
+
+    # Проверяем что пост существует
+    post = await orm_get_post_full(session, post_id=post_id)
+    if not post:
+        await call.answer("Пост не найден", show_alert=True)
+        return
+
+    # Определяем время удаления
+    delete_td = _delete_value_to_timedelta(delete_after)
+    auto_delete_at = utc_dt + delete_td if delete_td else None
+
+    # Создаём или обновляем PostTarget для каждого выбранного канала
+    for ch_id in selected_ids:
+        # Проверяем существует ли уже target
+        existing = await session.execute(
+            select(PostTarget).where(
+                PostTarget.post_id == post_id,
+                PostTarget.channel_id == ch_id
+            )
+        )
+        target = existing.scalar_one_or_none()
+
+        if target:
+            # Обновляем существующий
+            target.state = TargetState.scheduled
+            target.publish_at = utc_dt
+            target.auto_delete_at = auto_delete_at
+        else:
+            # Создаём новый
+            target = PostTarget(
+                post_id=post_id,
+                channel_id=ch_id,
+                state=TargetState.scheduled,
+                publish_at=utc_dt,
+                auto_delete_at=auto_delete_at,
+            )
+            session.add(target)
+
+    await session.commit()
+
+    # Форматируем подтверждение
+    local_dt = datetime.fromisoformat(data.get("schedule_local_dt"))
+    weekday = WEEKDAY_NAMES_FULL[local_dt.weekday()]
+    month = MONTH_NAMES_GENITIVE[local_dt.month]
+
+    await call.message.edit_text(
+        f"✅ Пост запланирован на {weekday}, {local_dt.day} {month} в {local_dt.hour:02d}:{local_dt.minute:02d}",
+        reply_markup=ik_finish_nav(),
+    )
+
+    # Очищаем состояние
+    await state.clear()
+    await call.answer("Пост запланирован!")
+
+@user_private_router.callback_query(SchedulePostCD.filter(F.action == "confirm_no"))
+async def schedule_confirm_no(call: types.CallbackQuery, callback_data: SchedulePostCD, state: FSMContext):
+    """Назад из подтверждения к выбору автоудаления."""
+    await state.set_state(SchedulePostStates.selecting_delete)
+
+    data = await state.get_data()
+    selected = data.get("schedule_delete_after")
+
+    try:
+        await call.message.delete()
+    except:
+        pass
+
+    await call.message.answer(
+        "⏱ <b>АВТОУДАЛЕНИЕ</b>\n\n"
+        "Выберите через какое время после выхода пост будет удалён:",
+        parse_mode="HTML",
+        reply_markup=build_schedule_delete_after_kb(callback_data.post_id, selected),
+    )
+    await call.answer()
+
+
+@user_private_router.callback_query(SchedulePostCD.filter(F.action == "back_to_time"))
+async def schedule_back_to_time(call: types.CallbackQuery, callback_data: SchedulePostCD, state: FSMContext):
+    """Назад из автоудаления к вводу времени."""
+    await state.set_state(SchedulePostStates.entering_time)
+
+    data = await state.get_data()
+    user_tz = data.get("schedule_user_timezone", "Europe/Moscow")
+    selected_date = data.get("schedule_selected_date")
+    if selected_date:
+        selected_date = date.fromisoformat(selected_date)
+
+    current = selected_date or date.today()
+
+    try:
+        await call.message.edit_text(
+            get_schedule_text(user_tz),
+            parse_mode="HTML",
+            reply_markup=build_schedule_day_selector_kb(
+                callback_data.post_id, current, selected_date
+            ),
+        )
+    except TelegramBadRequest:
+        pass
+    await call.answer()
+
+
+@user_private_router.callback_query(SchedulePostCD.filter(F.action == "back"))
+async def schedule_back_to_editor(call: types.CallbackQuery, callback_data: SchedulePostCD, state: FSMContext):
+    """Назад к редактору поста."""
+    await state.set_state(CreatePostStates.composing)
+
+    try:
+        await call.message.delete()
+    except:
+        pass
+
+    await call.answer()
+
+
 
 def _delete_value_to_timedelta(val: str) -> timedelta | None:
     return {
@@ -1836,11 +2307,19 @@ async def publish_confirm_yes(call: types.CallbackQuery, callback_data: PublishC
     post = await orm_get_post_full(session, post_id=post_id)  # должен вернуть post + targets
     targets = [t for t in post.targets if int(t.channel_id) in selected_ids]
 
+    if not targets:
+        await call.answer("Нет targets для публикации", show_alert=True)
+        return
+
     # 2) автоудаление
     delete_val = data.get("publish_delete_after", "none")
     delete_after = _delete_value_to_timedelta(delete_val)  # timedelta|None
 
     for t in targets:
+        if t.state == TargetState.sent:
+            t.state = TargetState.draft
+            t.sent_at = None
+            t.sent_message_id = None
         await orm_set_target_autodelete(
             session,
             actor_user_id=call.from_user.id,
@@ -3088,51 +3567,136 @@ async def get_reaction_keyboard_for_post(
 
 @user_private_router.callback_query(EditorCD.filter(F.action == "reactions"))
 async def editor_reactions(call: types.CallbackQuery, callback_data: EditorCD, state: FSMContext):
+    """Открыть меню настройки реакций."""
     await state.set_state(ReactionStates.entering_emojis)
     await state.update_data(reaction_post_id=callback_data.post_id)
-    await call.message.answer(REACTIONS_PROMPT, parse_mode="HTML")
+
+    await call.message.answer(
+        REACTIONS_PROMPT,
+        parse_mode="HTML",
+        reply_markup=build_reactions_setup_kb(callback_data.post_id)
+    )
+    await call.answer()
+
+
+@user_private_router.callback_query(EditorCD.filter(F.action == "clear_reactions"))
+async def editor_clear_reactions(call: types.CallbackQuery, callback_data: EditorCD, state: FSMContext,
+                                 session: AsyncSession):
+    """Очистить все реакции."""
+    post_id = callback_data.post_id
+
+    await session.execute(
+        delete(PostReactionButton).where(PostReactionButton.post_id == post_id)
+    )
+    await session.commit()
+
+    # Обновляем has_reactions в EditorState
+    data = await state.get_data()
+    if "editor" in data:
+        st = editor_state_from_dict(data["editor"])
+        st.has_reactions = False
+        await state.update_data(editor=editor_state_to_dict(st))
+
+    await state.set_state(CreatePostStates.composing)
+    await call.message.edit_text("✅ Реакции удалены")
+    await call.answer()
+
+
+@user_private_router.callback_query(EditorCD.filter(F.action == "reactions_back"))
+async def editor_reactions_back(call: types.CallbackQuery, callback_data: EditorCD, state: FSMContext,
+                                session: AsyncSession):
+    """Вернуться из меню реакций в редактор."""
+    await state.set_state(CreatePostStates.composing)
+
+    data = await state.get_data()
+    st = editor_state_from_dict(data.get("editor", {}))
+    editor_ctx = get_editor_ctx_from_data(data)
+
+    # Удаляем сообщение с промптом
+    try:
+        await call.message.delete()
+    except:
+        pass
+
     await call.answer()
 
 
 @user_private_router.message(StateFilter(ReactionStates.entering_emojis), F.text)
 async def editor_receive_reactions(message: types.Message, state: FSMContext, session: AsyncSession):
-    text = message.text.strip().lower()
-
-    if text == "clear":
-        # Удаляем все реакции
-        data = await state.get_data()
-        post_id = data.get("reaction_post_id")
-        if post_id:
-            await session.execute(
-                delete(PostReactionButton).where(PostReactionButton.post_id == post_id)
-            )
-            await session.commit()
-        await state.set_state(CreatePostStates.editing)
-        await message.answer("✅ Реакции удалены")
-        return
+    """Получение эмодзи для реакций."""
+    text = message.text.strip()
 
     # Парсим эмодзи
-    rows = parse_reaction_emojis(message.text)
+    rows = parse_reaction_emojis(text)
     is_valid, error = validate_emojis(rows)
 
     if not is_valid:
         await message.answer(f"❌ {error}")
         return
 
-    # Создаём кнопки
     data = await state.get_data()
     post_id = data.get("reaction_post_id")
 
     if post_id:
+        # Удаляем старые реакции
+        await session.execute(
+            delete(PostReactionButton).where(PostReactionButton.post_id == post_id)
+        )
+        # Создаём новые
         await create_reaction_buttons(session, post_id, rows)
         await session.commit()
 
-    # Возвращаемся в редактор
-    await state.set_state(CreatePostStates.editing)
+        # Обновляем has_reactions
+        if "editor" in data:
+            st = editor_state_from_dict(data["editor"])
+            st.has_reactions = True
+            await state.update_data(editor=editor_state_to_dict(st))
 
-    # Показываем результат
+    await state.set_state(CreatePostStates.composing)
+
     total = sum(len(row) for row in rows)
     await message.answer(f"✅ Добавлено {total} реакций в {len(rows)} ряд(ов)")
+
+    # === ДУБЛИРУЕМ ПРЕВЬЮ ПОСТА С КНОПКАМИ РЕДАКТИРОВАНИЯ ===
+    data = await state.get_data()
+    st = editor_state_from_dict(data.get("editor", {}))
+    editor_ctx = get_editor_ctx_from_data(data)
+
+    if post_id and st:
+        # Получаем пост для превью
+        post = await orm_get_post_full(session, post_id=post_id)
+        if post:
+            # Отправляем превью
+            if post.media:
+                media = sorted(post.media, key=lambda m: m.order_index)
+                first_media = media[0]
+
+                if first_media.media_type.value == "photo":
+                    res = await message.answer_photo(
+                        photo=first_media.file_id,
+                        caption=post.text,
+                        reply_markup=build_editor_kb(post_id, st, ctx=editor_ctx),
+                    )
+                elif first_media.media_type.value == "video":
+                    res = await message.answer_video(
+                        video=first_media.file_id,
+                        caption=post.text,
+                        reply_markup=build_editor_kb(post_id, st, ctx=editor_ctx),
+                    )
+                else:
+                    res = await message.answer(
+                        post.text or "​",
+                        reply_markup=build_editor_kb(post_id, st, ctx=editor_ctx),
+                    )
+            else:
+                res = await message.answer(
+                    post.text or "​",
+                    reply_markup=build_editor_kb(post_id, st, ctx=editor_ctx),
+                )
+
+            # Обновляем preview_message_id
+            st.preview_message_id = res.message_id
+            await state.update_data(editor=editor_state_to_dict(st))
 
 
 @user_private_router.callback_query(EditorCD.filter((F.action == "toggle") & (F.key == "comments")))
@@ -3248,3 +3812,179 @@ async def editor_detach_media(call: types.CallbackQuery, callback_data: EditorCD
     )
 
     await call.answer("✅ Медиа откреплено")
+
+
+@user_private_router.callback_query(CreatePostCD.filter(F.action == "menu"))
+async def create_post_menu_callback(call: types.CallbackQuery, state: FSMContext, session: AsyncSession):
+    """Обработчик кнопки 'Создать пост' из inline-клавиатуры."""
+    await state.clear()
+
+    user_id = call.from_user.id
+    folders = await orm_get_user_folders(session, user_id=user_id)
+
+    if not folders:
+        # Нет папок - показываем каналы напрямую
+        channels = await orm_get_user_channels(session, user_id=user_id)
+        if not channels:
+            await call.message.edit_text(
+                "У вас нет подключенных каналов.\\n"
+                "Сначала добавьте канал.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="➕ Добавить канал",
+                                          callback_data=CreatePostCD(action="add_channel").pack())],
+                ])
+            )
+        else:
+            await call.message.edit_text(
+                "📝 <b>СОЗДАТЬ ПОСТ</b>\n\nВыберите канал для публикации:",
+                parse_mode="HTML",
+                reply_markup=ik_channels_menu(channels),
+            )
+    else:
+        await call.message.edit_text(
+            "📝 <b>СОЗДАТЬ ПОСТ</b>\\n\\nВыберите папку или канал:",
+            parse_mode="HTML",
+            reply_markup=ik_folders_list(folders),
+        )
+
+    await call.answer()
+
+
+def get_schedule_text(user_tz: str) -> str:
+    """Текст для выбора даты/времени."""
+    tz_display = {
+        "Europe/Moscow": "GMT+3 Москва",
+        "Europe/Kiev": "GMT+2 Киев",
+        "Europe/London": "GMT+0 Лондон",
+        "Asia/Almaty": "GMT+6 Алматы",
+        "Asia/Vladivostok": "GMT+10 Владивосток",
+        "Asia/Yekaterinburg": "GMT+5 Екатеринбург",
+        "Asia/Novosibirsk": "GMT+7 Новосибирск",
+        "Asia/Krasnoyarsk": "GMT+7 Красноярск",
+        "Asia/Irkutsk": "GMT+8 Иркутск",
+        "Europe/Kaliningrad": "GMT+2 Калининград",
+        "Europe/Samara": "GMT+4 Самара",
+    }.get(user_tz, user_tz)
+
+    return (
+        "⏰ <b>ОТЛОЖИТЬ ПОСТ</b>\n\n"
+        f"Отправьте время выхода поста в вашем часовом поясе ({tz_display}) "
+        "в любом удобном формате, например:\n\n"
+        "<code>18:30</code>\n"
+        "<code>18 30</code>\n"
+        "<code>1830</code>\n"
+        "<code>18:30 04.08.2025</code>\n"
+        "<code>18:30 04.08</code>"
+    )
+
+
+# === ПАРСЕР ВРЕМЕНИ ===
+
+def parse_time_flexible(text: str) -> tuple[int, int] | None:
+    """
+    Парсит время в гибком формате:
+    - 1830 -> 18:30
+    - 18:30 -> 18:30
+    - 18 30 -> 18:30
+    - 123 -> 1:23
+    - 830 -> 8:30
+    """
+    import re
+    t = text.strip()
+
+    # Убираем все разделители (: и пробелы)
+    t = re.sub(r'[:\s]', '', t)
+
+    if not t.isdigit():
+        return None
+
+    if len(t) == 3:
+        # 123 -> 1:23
+        hh, mm = int(t[0]), int(t[1:3])
+    elif len(t) == 4:
+        # 1830 -> 18:30
+        hh, mm = int(t[:2]), int(t[2:])
+    elif len(t) <= 2:
+        # Только часы (18 -> 18:00)
+        hh, mm = int(t), 0
+    else:
+        return None
+
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        return None
+
+    return hh, mm
+
+
+def parse_datetime_flexible(text: str, default_date: date) -> tuple[date, int, int] | None:
+    """
+    Парсит дату и время в гибком формате:
+    - 18:30 -> default_date, 18:30
+    - 18:30 04.08 -> 04.08.current_year, 18:30
+    - 18:30 04.08.2025 -> 04.08.2025, 18:30
+    """
+    import re
+    t = text.strip()
+
+    # Сначала пробуем найти дату в конце
+    date_pattern = r'(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?$'
+    date_match = re.search(date_pattern, t)
+
+    if date_match:
+        # Есть дата - извлекаем её
+        dd = int(date_match.group(1))
+        mo = int(date_match.group(2))
+        yy = int(date_match.group(3)) if date_match.group(3) else default_date.year
+
+        try:
+            result_date = date(yy, mo, dd)
+        except ValueError:
+            return None
+
+        # Время - всё что до даты
+        time_str = t[:date_match.start()].strip()
+    else:
+        # Нет даты - используем default_date
+        result_date = default_date
+        time_str = t
+
+    # Парсим время
+    time_result = parse_time_flexible(time_str)
+    if not time_result:
+        return None
+
+    hh, mm = time_result
+    return result_date, hh, mm
+
+
+@user_private_router.callback_query(EditorCD.filter(F.action == "cancel"))
+async def editor_cancel(call: types.CallbackQuery, callback_data: EditorCD, state: FSMContext, session: AsyncSession):
+    """Отменить создание поста - удалить пост и вернуться к выбору каналов."""
+    data = await state.get_data()
+
+    post_id = callback_data.post_id
+
+    # Удаляем пост из БД (каскадно удалятся targets, media, buttons и т.д.)
+    if post_id:
+        post = await session.get(Post, post_id)
+        if post:
+            await session.delete(post)
+            await session.commit()
+
+    # Очищаем FSM
+    await state.clear()
+
+    # Удаляем сообщение с редактором
+    try:
+        await call.message.delete()
+    except:
+        pass
+
+    # Возвращаемся к выбору каналов/папок
+    await call.message.answer(
+        "📝 <b>СОЗДАНИЕ ПОСТА</b>\n\n"
+        "Выберите канал или папку для публикации:",
+        parse_mode="HTML",
+        reply_markup=ik_create_root_menu(),
+    )
+    await call.answer("Пост отменён")
