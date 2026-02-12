@@ -11,6 +11,7 @@ from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from filters.chat_types import ChatTypeFilter
+from handlers.user_private import PREMIUM_EMOJI
 from kbds.inline import (
     ContentPlanCD, ContentPlanDayCD, ContentPlanCalendarCD, ContentPlanPostCD,
     build_content_plan_main_kb, build_content_plan_channels_kb,
@@ -49,25 +50,25 @@ async def ignore_callback(call: types.CallbackQuery):
 # =============================================================================
 
 CONTENT_PLAN_MAIN_TEXT = (
-    "📊 <b>КОНТЕНТ-ПЛАН</b>\n\n"
+    f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['cont_plan']}\">🗓</tg-emoji> <b>КОНТЕНТ-ПЛАН</b>\n\n"
     "В этом разделе вы можете просматривать и изменять "
     "запланированные публикации.\n\n"
     "Выберите канал, в котором хотите увидеть контент-план."
 )
 
 CONTENT_PLAN_DAY_TEXT = (
-    "📊 <b>КОНТЕНТ-ПЛАН</b>\n\n"
+    f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['cont_plan']}\">🗓</tg-emoji> <b>КОНТЕНТ-ПЛАН</b>\n\n"
     "На {date_str} в {channel_name} "
     "{posts_text}."
 )
 
 CONTENT_PLAN_NO_POSTS_TEXT = (
-    "📊 <b>КОНТЕНТ-ПЛАН</b>\n\n"
+    f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['cont_plan']}\">🗓</tg-emoji> <b>КОНТЕНТ-ПЛАН</b>\n\n"
     "В выбранных каналах нет запланированных постов."
 )
 
 POST_VIEW_TEXT = (
-    "📝 <b>Пост</b>\n\n"
+    f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['eyes']}\">👀</tg-emoji> <b>Пост</b>\n\n"
     "Статус: {status}\n"
     "{link_text}"
     "Дата: {date_str}"

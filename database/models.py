@@ -219,7 +219,7 @@ class Post(Base):
 
     # Content
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
-
+    text_entities: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Post settings (from ТЗ "кнопки редактирования")
     silent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # 🔔/🔕
     pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # Закрепить

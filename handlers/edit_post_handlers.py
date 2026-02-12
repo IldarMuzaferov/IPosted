@@ -12,6 +12,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import joinedload
 
 from filters.chat_types import ChatTypeFilter
+from handlers.user_private import PREMIUM_EMOJI
 from kbds.post_editor import (
     EditorState, EditorContext,
     editor_state_to_dict, editor_state_from_dict,
@@ -66,12 +67,12 @@ class EditPostStates(StatesGroup):
 # =============================================================================
 
 EDIT_POST_START_TEXT = (
-    "✏️ <b>ИЗМЕНЕНИЕ ПОСТА</b>\n\n"
+    f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['edit_post']}\">✍️</tg-emoji> <b>ИЗМЕНЕНИЕ ПОСТА</b>\n\n"
     "Перешлите пост из вашего канала, который хотите изменить."
 )
 
 TIMER_SELECT_TEXT = (
-    "⏱ <b>ТАЙМЕР УДАЛЕНИЯ</b>\n\n"
+    f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['planing']}\">✍️</tg-emoji> <b>ТАЙМЕР УДАЛЕНИЯ</b>\n\n"
     "Выберите через какое время пост будет автоматически удалён."
 )
 
@@ -113,7 +114,7 @@ def get_publish_time_text(user_tz: str = "Europe/Moscow") -> str:
         "Asia/Almaty": "Алматы GMT+6",
     }
     return (
-        f"📅 <b>ВРЕМЯ ПУБЛИКАЦИИ</b>\n\n"
+        f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['cont_plan']}\">🗓</tg-emoji> <b>ВРЕМЯ ПУБЛИКАЦИИ</b>\n\n"
         f"Введите время в вашем часовом поясе ({tz_names.get(user_tz, user_tz)}).\n\n"
         f"Например: <code>18:01 16.8.2025</code>"
     )
@@ -643,7 +644,7 @@ async def edit_post_timer_chosen(call: types.CallbackQuery, callback_data: EditT
 
     data = await state.get_data()
     await _refresh_edit_kb(state, call.bot, call.message.chat.id, data.get("edit_preview_message_id"))
-    await call.answer(f"✅ Таймер: {format_timer(minutes)}")
+    await call.answer(f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✅</tg-emoji> Таймер: {format_timer(minutes)}")
 
 
 @edit_post_router.callback_query(EditTimerCD.filter(F.action == "back"))
@@ -668,7 +669,7 @@ async def edit_post_pub_time(call: types.CallbackQuery, state: FSMContext):
         return
 
     await call.message.answer(
-        "📅 <b>ВРЕМЯ ПУБЛИКАЦИИ</b>",
+        f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['cont_plan']}\">🗓</tg-emoji> <b>ВРЕМЯ ПУБЛИКАЦИИ</b>",
         parse_mode="HTML",
         reply_markup=build_publish_time_kb()
     )
@@ -736,7 +737,7 @@ async def edit_post_receive_time(message: types.Message, state: FSMContext):
     await state.set_state(EditPostStates.editing)
     data = await state.get_data()
     await _refresh_edit_kb(state, message.bot, message.chat.id, data.get("edit_preview_message_id"))
-    await message.answer(f"✅ Запланировано на {parsed.strftime('%H:%M %d.%m.%Y')}")
+    await message.answer(f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✅</tg-emoji> Запланировано на {parsed.strftime('%H:%M %d.%m.%Y')}", parse_mode="HTML")
 
 
 @edit_post_router.callback_query(EditPublishCD.filter(F.action == "back"))
@@ -857,7 +858,7 @@ async def edit_post_confirm(call: types.CallbackQuery, state: FSMContext, sessio
 
             await state.clear()
 
-            result = f"✅ <b>Изменения применены!</b>\n\nКанал: {data.get('edit_channel_title', 'Канал')}"
+            result = f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✍✅</tg-emoji> <b>Изменения применены!</b>\n\nКанал: {data.get('edit_channel_title', 'Канал')}"
             if success:
                 result += f"\nОбновлено: {', '.join(success)}"
             if errors:
@@ -892,8 +893,8 @@ async def edit_post_confirm(call: types.CallbackQuery, state: FSMContext, sessio
             pt = data.get("publish_time")
             time_str = pt.strftime('%H:%M %d.%m.%Y') if pt else 'сразу'
             await call.message.edit_text(
-                f"✅ <b>Сохранено!</b>\n\nКанал: {data.get('edit_channel_title')}\n"
-                f"Время: {time_str}\nТаймер: {format_timer(timer_minutes)}",
+                f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✅</tg-emoji> <b>Сохранено!</b>\n\nКанал: {data.get('edit_channel_title')}\n"
+                f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['clock']}\">🕔</tg-emoji> Время: {time_str}\nТаймер: {format_timer(timer_minutes)}",
                 parse_mode="HTML"
             )
 

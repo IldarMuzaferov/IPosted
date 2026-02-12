@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import User
 from filters.chat_types import ChatTypeFilter
+from handlers.user_private import PREMIUM_EMOJI
 from kbds.inline import (
     SettingsCD, TimezoneCD, FoldersCD, FolderEditCD, FolderChannelsCD,
     build_settings_main_kb, build_timezone_kb, build_folders_list_kb,
@@ -25,25 +26,30 @@ settings_router = Router()
 settings_router.message.filter(ChatTypeFilter(["private"]))
 
 SETTINGS_MAIN_TEXT = (
-    "⚙️ <b>НАСТРОЙКИ</b>\n\n"
+    f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['settings']}\">⚙️</tg-emoji> <b>НАСТРОЙКИ</b>\n\n"
     "В этом разделе вы можете настроить работу с ботом, "
     "с отдельным каналом, а также добавить новый канал в Posted."
 )
 
 TIMEZONE_TEXT = (
-    "🕐 <b>ЧАСОВОЙ ПОЯС</b>\n\n"
+    f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['time_zone']}\">🏘</tg-emoji> <b>ЧАСОВОЙ ПОЯС</b>\n\n"
     "Выберите часовой пояс. Время выхода постов будет "
     "отображаться в вашем часовом поясе.\n\n"
     "Ваш часовой пояс: <b>{tz_name}</b>"
 )
 
 FOLDERS_TEXT = (
-    "📁 <b>ПАПКИ</b>\n\n"
+    f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['folders']}\">📂</tg-emoji> <b>ПАПКИ</b>\n\n"
     "Группируйте каналы, объединяя их в папки."
 )
 
-FOLDER_EDIT_TEXT = (
-    "📁 <b>ПАПКА «{title}»</b>\n\n"
+# FOLDER_EDIT_TEXT = (
+#     f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['folders']}\">📂</tg-emoji> <b>ПАПКА «{title}»</b>\n\n"
+#     "В этом разделе можно настроить папку."
+# )
+# ИСПРАВЛЕНО: Убираем {title} из глобальной константы
+FOLDER_EDIT_TEXT_TEMPLATE = (
+    f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['folders']}\">📂</tg-emoji> <b>ПАПКА «{{title}}»</b>\n\n"
     "В этом разделе можно настроить папку."
 )
 
@@ -59,9 +65,9 @@ ADD_CHANNEL_FROM_SETTINGS_TEXT = (
     "➕ <b>ДОБАВЛЕНИЕ КАНАЛА</b>\n\n"
     "Чтобы подключить канал:\n\n"
     "1. Сделайте @IPostedBot администратором канала с правами:\n"
-    "   ✅ Отправка сообщений\n"
-    "   ✅ Удаление сообщений\n"
-    "   ✅ Редактирование сообщений\n\n"
+    f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✅</tg-emoji> Отправка сообщений\n"
+    f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✅</tg-emoji> Удаление сообщений\n"
+    f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✅</tg-emoji> Редактирование сообщений\n\n"
     "2. Перешлите в этот диалог любое сообщение из канала."
 )
 
@@ -372,6 +378,13 @@ async def folder_create_name(message: types.Message, state: FSMContext, session:
 # ПАПКИ - РЕДАКТИРОВАНИЕ
 # =============================================================================
 
+def get_folder_edit_text(title: str) -> str:
+    """Возвращает текст для редактирования папки с подставленным названием."""
+    return (
+        f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['folders']}\">📂</tg-emoji> <b>ПАПКА «{title}»</b>\n\n"
+        "В этом разделе можно настроить папку."
+    )
+
 @settings_router.callback_query(FoldersCD.filter(F.action == "select"))
 async def folder_select(call: types.CallbackQuery, callback_data: FoldersCD, session: AsyncSession):
     """Открыть редактирование папки."""
@@ -390,7 +403,7 @@ async def folder_select(call: types.CallbackQuery, callback_data: FoldersCD, ses
     channels_count = len(channels)
 
     await call.message.edit_text(
-        FOLDER_EDIT_TEXT.format(title=folder.title),
+        get_folder_edit_text(folder.title),
         parse_mode="HTML",
         reply_markup=build_folder_edit_kb(folder_id, channels_count),
     )
@@ -451,7 +464,7 @@ async def folder_rename_receive(message: types.Message, state: FSMContext, sessi
     channels_count = len(channels)
 
     await message.answer(
-        f"✅ Папка переименована!\n\n" + FOLDER_EDIT_TEXT.format(title=new_name),
+        f"✅ Папка переименована!\n\n" +  get_folder_edit_text(new_name),
         parse_mode="HTML",
         reply_markup=build_folder_edit_kb(folder_id, channels_count),
     )
@@ -674,7 +687,7 @@ async def folder_channels_done(call: types.CallbackQuery, callback_data: FolderC
         channels_count = len(channels)
 
         await call.message.edit_text(
-            f"✅ Каналы сохранены!\n\n" + FOLDER_EDIT_TEXT.format(title=folder.title),
+            f"✅ Каналы сохранены!\n\n" + get_folder_edit_text(folder.title),
             parse_mode="HTML",
             reply_markup=build_folder_edit_kb(folder_id, channels_count),
         )
@@ -711,7 +724,7 @@ async def folder_channels_back(call: types.CallbackQuery, callback_data: FolderC
             channels_count = len(channels)
 
             await call.message.edit_text(
-                FOLDER_EDIT_TEXT.format(title=folder.title),
+                get_folder_edit_text(folder.title),
                 parse_mode="HTML",
                 reply_markup=build_folder_edit_kb(folder_id, channels_count),
             )

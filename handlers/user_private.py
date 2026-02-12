@@ -52,34 +52,58 @@ from zoneinfo import ZoneInfo
 user_private_router = Router()
 user_private_router.message.filter(ChatTypeFilter(["private"]))
 
+PREMIUM_EMOJI = {
+    "check": "5431446665070415240",      # ✅ галочка
+    "star": "5258165702707125574",        # ⭐ звезда
+    "clock": "5258419835922030550",       # 🕔 часики
+    "basket": "5258130763148172425",      # 🗑 корзина
+    "artist": "5258215635996908355",      # 👩‍🎨 художник
+    "cycle": "5258420634785947640",       # 🔄 циклично
+    "eyes": "5260341314095947411",         # 👀 глаза
+    "planing": "5258419835922030550",       #🕔  Публикация запланирована
+    "logo": "5431446665070415240",          #✅ лого постед
+    "creating": "5260652420052032852",      # ⬆️ СОЗДАНИЕ ПОСТА
+    "sett_send": "5258260149037965799",      #💼 НАСТРОЙКИ ОТПРАВКИ
+    "edit_post": "5258331647358540449",       #✍️ИЗМЕНЕНИЕ ПОСТА
+    "cont_plan": "5258105663359294787",       #🗓 Контент план
+    "con_cont_plan": "5199457120428249992",    #🕘 УПРАВЛЕНИЕ КОНТЕНТ-ПЛАНОМ
+    "settings": "5258096772776991776",         #⚙️ НАСТРОЙКИ
+    "time_zone": "5257963315258204021",        #🏘 ЧАСОВОЙ ПОЯС
+    "folders": "5257969839313526622",          # 📂 ПАПКИ
+    "sign": "5260726538302660868",              #✅ Права бота для поключения канала
+    }
+
+
 START_TEXT = (
-    "✅ Posted - это простой и удобный бот для отложенного постинга, поддерживающий работу с ⭐️ анимированными эмодзи.\n\n"
-    "Бот позволяет:\n\n"
-    "🕔 Планировать выход публикаций в ваших каналах\n"
-    "🗑 Автоматически удалять их по таймеру\n"
-    "👩‍🎨 Создавать и настраивать посты любого формата\n"
-    "🔄 Зацикливать публикации, добавлять кнопки и водяные знаки\n"
-    "👀 И многое другое"
-)
+    f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['logo']}\">✅</tg-emoji>Posted - это простой и удобный бот для отложенного постинга, "
+        f"поддерживающий работу с <tg-emoji emoji-id=\"{PREMIUM_EMOJI['star']}\">⭐</tg-emoji> "
+        "анимированными эмодзи.\n\n"
+        "Бот позволяет:\n\n"
+        f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['clock']}\">🕔</tg-emoji> Планировать выход публикаций в ваших каналах\n"
+        f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['basket']}\">🗑</tg-emoji> Автоматически удалять их по таймеру\n"
+        f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['artist']}\">👩‍🎨</tg-emoji> Создавать и настраивать посты любого формата\n"
+        f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['cycle']}\">🔄</tg-emoji> Зацикливать публикации, добавлять кнопки и водяные знаки\n"
+        f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['eyes']}\">👀</tg-emoji> И многое другое"
+    )
 
 NO_CHANNELS_TEXT = (
     "➕ ДОБАВЛЕНИЕ КАНАЛА\n\n"
     "Чтобы подключить канал:\n\n"
     "1. Сделайте @IPostedBot администратором канала, дав следующие права:\n\n"
-    "✅ Отправка сообщений\n"
-    "✅ Удаление сообщений\n"
-    "✅ Редактирование сообщений\n\n"
+    f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✅</tg-emoji> Отправка сообщений\n"
+    f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✅</tg-emoji> Удаление сообщений\n"
+    f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✅</tg-emoji> Редактирование сообщений\n\n"
     "2. Перешлите в диалог с ботом любое сообщение из канала."
 )
 
 def connected_text(title: str, url: str) -> str:
     return (
-        f"✅ Вы успешно подключили канал {title} ({url}) к Posted.\n\n"
+        f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✅</tg-emoji> Вы успешно подключили канал {title} ({url}) к Posted.\n\n"
         f"Чтобы дать другому пользователю возможность работать с каналом, добавьте его в канал {title} ({url}) "
         "в качестве администратора, дав права на:\n\n"
-        "✅ Отправку сообщений\n"
-        "✅ Удаление сообщений\n"
-        "✅ Редактирование сообщений"
+        f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✅</tg-emoji> Отправку сообщений\n"
+        f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✅</tg-emoji> Удаление сообщений\n"
+        f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✅</tg-emoji> Редактирование сообщений"
     )
 
 COMMENTS_WARNING = (
@@ -93,15 +117,8 @@ COMMENTS_WARNING = (
 @user_private_router.message(CommandStart())
 async def cmd_start(message: types.Message, session: AsyncSession, state: FSMContext):
     await state.clear()
-    # опционально: регистрация/обновление юзера в БД
-    # await orm_upsert_user(
-    #     session,
-    #     user_id=message.from_user.id,
-    #     username=message.from_user.username,
-    #     first_name=message.from_user.first_name,
-    # )
+    await message.answer(START_TEXT, parse_mode="HTML", reply_markup=main_reply_kb())
 
-    await message.answer(START_TEXT, reply_markup=main_reply_kb())
 
 def main_reply_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -162,12 +179,12 @@ async def cp_channels_menu(call: types.CallbackQuery, state: FSMContext, session
 
     if not channels:
         await state.set_state(ConnectChannelStates.waiting_channel)
-        await call.message.edit_text(NO_CHANNELS_TEXT)
+        await call.message.edit_text(NO_CHANNELS_TEXT, parse_mode="HTML")
         await call.answer()
         return
 
     # если каналы есть — оставляй твою текущую логику меню
-    await call.message.edit_text(f"⬆️ СОЗДАНИЕ ПОСТА \n Выберите канал, в котором хотите создать публикацию.", reply_markup=ik_channels_menu(channels))
+    await call.message.edit_text(f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['creating']}\">⬆️</tg-emoji> СОЗДАНИЕ ПОСТА \n Выберите канал, в котором хотите создать публикацию.", parse_mode="HTML", reply_markup=ik_channels_menu(channels))
     await call.answer()
 
 @user_private_router.callback_query(CreatePostCD.filter(F.action == "open_folder"))
@@ -222,8 +239,9 @@ async def cp_pick_folder_all(call: types.CallbackQuery, callback_data: CreatePos
 
     await state.set_state(CreatePostStates.composing)
     await call.message.edit_text(
-        "Ок. Публикуем во всех каналах этой папки.\n\n"
-        "Отправьте текст и/или медиа для поста одним сообщением.",
+        f"📂 Всё готово! Пост выйдет сразу во всех каналах этой папки."
+        f"✏️ Теперь давайте создадим сам пост. Просто отправьте мне текст, фото, видео или любой другой файл — и мы вместе его оформим."
+        f"Жду ваше сообщение 🌿,"
     )
     await call.answer()
 
@@ -337,7 +355,7 @@ async def cp_all_channels(call: types.CallbackQuery, state: FSMContext, session:
 async def cp_add_channel(call: types.CallbackQuery, state:FSMContext):
     # заглушка под будущий этап (инструкция/мастер подключения)
     await state.set_state(ConnectChannelStates.waiting_channel)
-    await call.message.edit_text(NO_CHANNELS_TEXT)
+    await call.message.edit_text(NO_CHANNELS_TEXT, parse_mode="HTML")
     await call.answer()
 
 async def cp_add_folder(call: types.CallbackQuery):
@@ -541,10 +559,12 @@ async def connect_channel_message(message: types.Message, state: FSMContext, ses
             "Канал не подключен.\n\n"
             f"Причина: {err}\n\n"
             "Сделайте бота администратором и выдайте права:\n"
-            "✅ Отправка сообщений\n"
-            "✅ Удаление сообщений\n"
-            "✅ Редактирование сообщений\n"
-            "✅ Закрепление сообщений"
+            f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✅</tg-emoji> Отправка сообщений\n"
+            f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✅</tg-emoji> Удаление сообщений\n"
+            f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✅</tg-emoji> Редактирование сообщений\n"
+            f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sign']}\">✅</tg-emoji> Закрепление сообщений",
+            parse_mode="HTML",
+
         )
         return
 
@@ -611,6 +631,7 @@ async def connect_channel_message(message: types.Message, state: FSMContext, ses
 
     await message.answer(
         connected_text(ch_title, url) + warning_text + comments_warning,
+        parse_mode="HTML",
         reply_markup=ik_after_channel_connected(),
         disable_web_page_preview=True,
     )
@@ -1767,7 +1788,7 @@ async def editor_continue(call: types.CallbackQuery, callback_data: EditorCD, st
     channel_url = f"https://t.me/{first.username}" if getattr(first, "username", None) else "https://t.me/"
 
     text = (
-        "💼 НАСТРОЙКИ ОТПРАВКИ\n\n"
+        f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['sett_send']}\">💼</tg-emoji> НАСТРОЙКИ ОТПРАВКИ\n\n"
         f"Пост готов к публикации в канале {channel_title} ({channel_url})."
     )
 
@@ -1779,7 +1800,7 @@ async def editor_continue(call: types.CallbackQuery, callback_data: EditorCD, st
     )
     await state.set_state(PublishStates.choosing_send_mode)
 
-    await call.message.answer(text, reply_markup=ik_send_mode(st.post_id, channel_title, channel_url), disable_web_page_preview=True)
+    await call.message.answer(text, parse_mode="HTML",  reply_markup=ik_send_mode(st.post_id, channel_title, channel_url), disable_web_page_preview=True)
     await call.answer()
 
 
@@ -3316,7 +3337,7 @@ async def settings_reply_button(message: types.Message, state: FSMContext, sessi
     await session.commit()
 
     await message.answer(
-        "⚙️ <b>НАСТРОЙКИ</b>\n\n"
+        f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['settings']}\">⚙️</tg-emoji> <b>НАСТРОЙКИ</b>\n\n"
         "В этом разделе вы можете настроить работу с ботом, "
         "с отдельным каналом, а также добавить новый канал в Posted.",
         parse_mode="HTML",
@@ -3982,7 +4003,7 @@ async def editor_cancel(call: types.CallbackQuery, callback_data: EditorCD, stat
 
     # Возвращаемся к выбору каналов/папок
     await call.message.answer(
-        "📝 <b>СОЗДАНИЕ ПОСТА</b>\n\n"
+        f"<tg-emoji emoji-id=\"{PREMIUM_EMOJI['creating']}\">⬆️</tg-emoji> <b>СОЗДАНИЕ ПОСТА</b>\n\n"
         "Выберите канал или папку для публикации:",
         parse_mode="HTML",
         reply_markup=ik_create_root_menu(),

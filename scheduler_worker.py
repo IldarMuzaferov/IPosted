@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime
 from typing import Iterable
 
@@ -10,7 +11,7 @@ from aiogram.types import (
     InputMediaPhoto,
     InputMediaVideo,
     InputMediaDocument,
-    InputMediaAnimation,
+    InputMediaAnimation, MessageEntity,
 )
 
 from sqlalchemy import select
@@ -83,6 +84,9 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
     """
     Возвращает список message_id отправленных сообщений (для альбома их несколько).
     """
+    # В начале _send_target добавь:
+    bot_info = await bot.get_me()
+    print(f"Bot has premium: {bot_info.is_premium}")
     post = t_full.post
     if post.is_repost and post.source_chat_id and post.source_message_id:
         try:
@@ -171,12 +175,16 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
         m = post.media[0]
         mt = m.media_type
         caption = text if text else None
+        html_text, parse_mode = _convert_to_html_with_emoji(text, post.text_entities)
+        сaption = html_text or caption
+
 
         if mt == MediaType.photo:
             msg = await bot.send_photo(
                 t_full.channel_id,
                 photo=m.file_id,
-                caption=caption,
+                caption=html_text or caption,
+                parse_mode=parse_mode,
                 show_caption_above_media=show_caption_above,  # <-- Текст сверху!
                 reply_markup=kb,
                 disable_notification=bool(post.silent),
@@ -187,7 +195,7 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
             msg = await bot.send_video(
                 t_full.channel_id,
                 video=m.file_id,
-                caption=caption,
+                caption=html_text or caption,
                 show_caption_above_media=show_caption_above,  # <-- Текст сверху!
                 reply_markup=kb,
                 disable_notification=bool(post.silent),
@@ -198,7 +206,7 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
             msg = await bot.send_document(
                 t_full.channel_id,
                 document=m.file_id,
-                caption=caption,
+                caption=html_text or caption,
                 reply_markup=kb,
                 disable_notification=bool(post.silent),
                 protect_content=bool(post.protected),
@@ -208,7 +216,7 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
             msg = await bot.send_animation(
                 t_full.channel_id,
                 animation=m.file_id,
-                caption=caption,
+                caption=html_text or caption,
                 show_caption_above_media=show_caption_above,  # <-- Текст сверху!
                 reply_markup=kb,
                 disable_notification=bool(post.silent),
@@ -220,7 +228,7 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
             msg = await bot.send_voice(
                 t_full.channel_id,
                 voice=m.file_id,
-                caption=caption,
+                caption=html_text or caption,
                 reply_markup=kb,
                 disable_notification=bool(post.silent),
                 protect_content=bool(post.protected),
@@ -257,15 +265,36 @@ async def _send_target(bot: Bot, t_full: PostTarget) -> list[int]:
         # ==========================================================================
         # 3) ТОЛЬКО ТЕКСТ
         # ==========================================================================
+    html_text, parse_mode = _convert_to_html_with_emoji(text, post.text_entities)
+    print(f"=== КОНВЕРТАЦИЯ ===")
+    print(f"HTML: {html_text}")
+
+    # Прямо перед отправкой:
+    final_text = html_text or text or "​"
+    print(f"=== ОТПРАВКА ===")
+    print(f"final_text: {final_text}")
+    print(f"parse_mode: {parse_mode}")
     msg = await bot.send_message(
         chat_id=t_full.channel_id,
-        text=text or "​",
+        text=final_text or "​",
+        parse_mode=parse_mode,
         reply_markup=kb,
         disable_notification=bool(post.silent),
         protect_content=bool(post.protected),
         reply_to_message_id=reply_to_message_id,
     )
     sent_ids.append(msg.message_id)
+    print(f"=== ОТПРАВКА ПОСТА ===")
+    print(f"post.text_entities: {post.text_entities}")
+    entities = _parse_entities(post.text_entities)
+    print(f"parsed entities: {entities}")
+    # Добавь тестовый код:
+    test_text = 'Тест <tg-emoji emoji-id="5368324170671202286">✅</tg-emoji> premium emoji'
+    await bot.send_message(
+        chat_id=t_full.channel_id,
+        text=test_text,
+        parse_mode="HTML"
+    )
 
     if bool(post.pinned):
         try:
@@ -492,3 +521,62 @@ async def check_auto_delete(bot: Bot):
         # Ждём 30 секунд
         await asyncio.sleep(30)
 
+def _parse_entities(entities_json: str | None) -> list[MessageEntity] | None:
+    """Парсит JSON entities обратно в объекты MessageEntity."""
+    if not entities_json:
+        return None
+    try:
+        data = json.loads(entities_json)
+        return [MessageEntity(**e) for e in data]
+    except:
+        return None
+
+
+def _convert_to_html_with_emoji(text: str, entities_json: str | None) -> tuple[str, str | None]:
+    """
+    Конвертирует текст с entities в HTML с <tg-emoji> тегами.
+    """
+    if not text or not entities_json:
+        return text, None
+
+    try:
+        entities = json.loads(entities_json)
+    except:
+        return text, None
+
+    # Фильтруем только custom_emoji
+    custom_emojis = [e for e in entities if e.get("type") == "custom_emoji"]
+
+    if not custom_emojis:
+        return text, None
+
+    # Сортируем по offset в обратном порядке
+    custom_emojis.sort(key=lambda e: e["offset"], reverse=True)
+
+    # Работаем с UTF-16 (Telegram использует UTF-16 для offset)
+    text_utf16 = text.encode('utf-16-le')
+
+    for e in custom_emojis:
+        offset = e["offset"]
+        length = e["length"]
+        emoji_id = e.get("custom_emoji_id")
+
+        if not emoji_id:
+            continue
+
+        # UTF-16 LE: 2 байта на code unit
+        start_bytes = offset * 2
+        end_bytes = (offset + length) * 2
+
+        # Извлекаем эмодзи
+        emoji_bytes = text_utf16[start_bytes:end_bytes]
+        original_emoji = emoji_bytes.decode('utf-16-le')
+
+        # HTML тег
+        html_tag = f'<tg-emoji emoji-id="{emoji_id}">{original_emoji}</tg-emoji>'.encode('utf-16-le')
+
+        # Заменяем в UTF-16
+        text_utf16 = text_utf16[:start_bytes] + html_tag + text_utf16[end_bytes:]
+
+    result = text_utf16.decode('utf-16-le')
+    return result, "HTML"

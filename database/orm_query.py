@@ -19,6 +19,7 @@ ORM Query Layer для Posted Bot
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Sequence, Iterable
@@ -1393,15 +1394,30 @@ async def orm_create_post_from_message(
 ) -> int:
     text = message.text or message.caption or None
 
+
+    entities = message.entities or message.caption_entities
+    entities_json = None
+    if entities:
+        entities_json = json.dumps([e.model_dump() for e in entities])
+
+    print(f"=== СОХРАНЕНИЕ ПОСТА ===")
+    print(f"text: {text}")
+    print(f"entities: {entities}")
+    print(f"entities_json: {entities_json}")
+
     post = Post(
         author_id=user_id,
         text=text,
         created_at=datetime.utcnow(),
         source_chat_id=message.chat.id,
+        text_entities=entities_json,
         source_message_id=message.message_id,
     )
     session.add(post)
     await session.flush()
+    # post.source_chat_id = message.chat.id
+    # post.source_message_id = message.message_id
+
 
     # ========== ДОБАВЛЕНО: Сохраняем медиа ==========
     media_type_str, file_id, file_unique_id = _extract_media_from_message(message)
@@ -1440,15 +1456,19 @@ async def orm_create_post_from_album(
         channel_ids,
 ) -> int:
     text = None
+    entities_json = None
     for msg in messages:
         if msg.caption:
             text = msg.caption
+            if msg.caption_entities:
+                entities_json = json.dumps([e.model_dump() for e in msg.caption_entities])
             break
     first_msg = messages[0] if messages else None
 
     post = Post(
         author_id=user_id,
         text=text,
+        text_entities=entities_json,
         created_at=datetime.utcnow(),
         source_chat_id=first_msg.chat.id if first_msg else None,  # <-- ДОБАВИТЬ
         source_message_id=first_msg.message_id if first_msg else None,
